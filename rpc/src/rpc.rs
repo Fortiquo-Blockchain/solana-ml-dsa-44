@@ -4540,8 +4540,8 @@ pub mod rpc_obsolete_v1_7 {
     }
 }
 
-const MAX_BASE58_SIZE: usize = 1683; // Golden, bump if PACKET_DATA_SIZE changes
-const MAX_BASE64_SIZE: usize = 1644; // Golden, bump if PACKET_DATA_SIZE changes
+const MAX_BASE58_SIZE: usize = 11188; // Golden, bump if PACKET_DATA_SIZE changes (was 1683 at 1232)
+const MAX_BASE64_SIZE: usize = 10924; // Golden, bump if PACKET_DATA_SIZE changes (was 1644 at 1232)
 fn decode_and_deserialize<T>(
     encoded: String,
     encoding: TransactionBinaryEncoding,

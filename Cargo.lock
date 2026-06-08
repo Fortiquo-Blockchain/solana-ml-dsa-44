@@ -1967,6 +1967,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fips204"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9fb5a367b9846933e271a3c2a992930743f82ae5e8cb7faa780715a80fa0b15"
+dependencies = [
+ "rand_core 0.6.4",
+ "sha2 0.10.8",
+ "sha3 0.10.8",
+ "zeroize",
+]
+
+[[package]]
 name = "fixedbitset"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6423,6 +6435,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "solana-ml-dsa-program-tests"
+version = "2.0.0"
+dependencies = [
+ "assert_matches",
+ "fips204",
+ "solana-program-test",
+ "solana-rpc-client",
+ "solana-sdk",
+]
+
+[[package]]
 name = "solana-net-shaper"
 version = "2.0.0"
 dependencies = [
@@ -7003,6 +7026,7 @@ dependencies = [
  "digest 0.10.7",
  "ed25519-dalek",
  "ed25519-dalek-bip32",
+ "fips204",
  "generic-array 0.14.7",
  "hex",
  "hmac 0.12.1",
@@ -9287,9 +9311,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.3.0"
+version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4756f7db3f7b5574938c3eb1c117038b8e07f95ee6718c0efad4ac21508f1efd"
+checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
 dependencies = [
  "zeroize_derive",
 ]

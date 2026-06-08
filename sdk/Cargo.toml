@@ -30,6 +30,7 @@ full = [
     "serde_json",
     "ed25519-dalek",
     "ed25519-dalek-bip32",
+    "fips204",
     "solana-logger",
     "libsecp256k1",
     "sha3",
@@ -52,6 +53,7 @@ derivation-path = { workspace = true }
 digest = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
 ed25519-dalek-bip32 = { workspace = true, optional = true }
+fips204 = { workspace = true, optional = true }
 generic-array = { workspace = true, features = ["serde", "more_lengths"], optional = true }
 hmac = { workspace = true }
 itertools =  { workspace = true }

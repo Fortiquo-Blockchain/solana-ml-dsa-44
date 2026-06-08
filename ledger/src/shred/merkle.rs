@@ -39,7 +39,8 @@ const_assert_eq!(SIZE_OF_MERKLE_ROOT, 32);
 pub(crate) const SIZE_OF_MERKLE_ROOT: usize = std::mem::size_of::<Hash>();
 const_assert_eq!(SIZE_OF_MERKLE_PROOF_ENTRY, 20);
 const SIZE_OF_MERKLE_PROOF_ENTRY: usize = std::mem::size_of::<MerkleProofEntry>();
-const_assert_eq!(ShredData::SIZE_OF_PAYLOAD, 1203);
+// fork: grows with PACKET_DATA_SIZE 1232->8192 (+6960)
+const_assert_eq!(ShredData::SIZE_OF_PAYLOAD, 8163);
 
 // Defense against second preimage attack:
 // https://en.wikipedia.org/wiki/Merkle_tree#Second_preimage_attack
