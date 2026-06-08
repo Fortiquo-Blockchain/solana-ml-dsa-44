@@ -3642,6 +3642,68 @@ pub mod rpc_full {
                     "unsupported encoding: {tx_encoding}. Supported encodings: base58, base64"
                 ))
             })?;
+            // Post-quantum ML-DSA-44 transactions use a custom wire format tagged by a
+            // 0x00 lead byte. Detect it by decoding first; verify the ML-DSA signatures
+            // and address binding here (in place of the Ed25519 preflight), then forward
+            // the raw bytes (sigverify + banking re-derive everything from them).
+            //
+            // NOTE: this ML-DSA preflight is signature-only by design for Phase 1 — unlike
+            // the Ed25519 branch below it does NOT run a health check or a full
+            // `simulate_transaction`, so an ML-DSA tx with a stale blockhash / insufficient
+            // funds is accepted here and fails later in banking rather than at preflight.
+            // Verification itself is never skipped: sigverify re-checks every 0x00 packet.
+            let ml_dsa_wire: Option<Vec<u8>> = match binary_encoding {
+                TransactionBinaryEncoding::Base58 => bs58::decode(&data).into_vec().ok(),
+                TransactionBinaryEncoding::Base64 => BASE64_STANDARD.decode(&data).ok(),
+            };
+            if let Some(wire_transaction) = ml_dsa_wire.filter(|w| {
+                w.first() == Some(&solana_sdk::ml_dsa_transaction::ML_DSA_TX_MARKER)
+            }) {
+                if wire_transaction.len() > PACKET_DATA_SIZE {
+                    return Err(Error::invalid_params(format!(
+                        "decoded transaction too large: {} bytes (max: {PACKET_DATA_SIZE})",
+                        wire_transaction.len()
+                    )));
+                }
+                let mltx =
+                    solana_sdk::ml_dsa_transaction::MlDsaTransaction::deserialize(&wire_transaction)
+                        .map_err(|e| {
+                            Error::invalid_params(format!("invalid ML-DSA transaction: {e:?}"))
+                        })?;
+                if !skip_preflight && !mltx.verify_offchain() {
+                    return Err(RpcCustomError::SendTransactionPreflightFailure {
+                        message:
+                            "Transaction simulation failed: ML-DSA signature verification failed"
+                                .to_string(),
+                        result: RpcSimulateTransactionResult {
+                            err: Some(TransactionError::SignatureFailure),
+                            logs: Some(vec![]),
+                            accounts: None,
+                            units_consumed: Some(0),
+                            return_data: None,
+                            inner_instructions: None,
+                        },
+                    }
+                    .into());
+                }
+                let signature = mltx.synthetic_signature();
+                let preflight_bank = &*meta.get_bank_with_config(RpcContextConfig {
+                    commitment: preflight_commitment.map(|commitment| CommitmentConfig { commitment }),
+                    min_context_slot,
+                })?;
+                let last_valid_block_height = preflight_bank
+                    .get_blockhash_last_valid_block_height(&mltx.message.recent_blockhash)
+                    .unwrap_or(0);
+                return _send_transaction(
+                    meta,
+                    signature,
+                    wire_transaction,
+                    last_valid_block_height,
+                    None,
+                    max_retries,
+                );
+            }
+
             let (wire_transaction, unsanitized_tx) =
                 decode_and_deserialize::<VersionedTransaction>(data, binary_encoding)?;
 

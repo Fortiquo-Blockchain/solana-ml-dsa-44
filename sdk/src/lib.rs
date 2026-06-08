@@ -82,6 +82,8 @@ pub mod inflation;
 pub mod inner_instruction;
 pub mod log;
 pub mod ml_dsa_instruction;
+pub mod ml_dsa_keypair;
+pub mod ml_dsa_transaction;
 pub mod native_loader;
 pub mod net;
 pub mod nonce_account;

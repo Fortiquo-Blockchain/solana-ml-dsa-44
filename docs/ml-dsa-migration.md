@@ -1,6 +1,6 @@
 # Migrating to Post-Quantum Signatures (ML-DSA-44)
 
-> **Status:** Phase 0 (app-level feature) delivered & verified · Phases 1–3 planned · **Date:** 2026-06-08
+> **Status:** Phases 0–1 delivered & verified (app-level feature + post-quantum user payments) · Phases 2–3 planned · **Date:** 2026-06-08
 > **In one line:** replace the validator's signature algorithm with a quantum-resistant one — feasible on our own network, not on live Solana.
 
 ---
@@ -132,7 +132,7 @@ flowchart TB
 | 1 | **App-level checks** | 🟢 Easy | Self-contained; a safe warm-up that proves the technology |
 | 2 | **Validator votes** | 🟢 Easy (gated) | Almost free once payments work — a vote *is* a transaction |
 | 3 | **Node-to-node chatter** | 🟡 Medium | Comes mostly along with the shared engine; its own size limits to widen |
-| 4 | **User payments** | 🟠 Hard | Where both walls get solved — the linchpin everything else needs |
+| 4 | **User payments** | 🟠 Hard · ✅ **DONE** | Where both walls get solved — the linchpin. Live: an ML-DSA-signed transfer confirms on-chain |
 | 5 | **Block broadcasting** | 🔴 Hardest | The signature is bigger than a whole block fragment; a real redesign |
 
 **Note:** *easiest* is not *first to matter*. The real spine is user payments (#4); votes and a meaningful demo can't exist without it.
@@ -156,7 +156,7 @@ flowchart TB
 ```mermaid
 flowchart TB
     P0["Phase 0 · App-level feature<br/>✅ DONE — verified live"]
-    P1["Phase 1 · User payments<br/>the foundation"]
+    P1["Phase 1 · User payments<br/>✅ DONE — verified live"]
     P2a["Phase 2a · Votes<br/>nearly free"]
     P2b["Phase 2b · Node chatter<br/>medium"]
     P3["Phase 3 · Block broadcasting<br/>optional · redesign"]
@@ -165,7 +165,7 @@ flowchart TB
     P2a --> P3
     P2b --> P3
     style P0 fill:#d6f5d6
-    style P1 fill:#fff2cc
+    style P1 fill:#d6f5d6
     style P2a fill:#d6f5d6
     style P2b fill:#fff3cd
     style P3 fill:#f8d7da
@@ -174,7 +174,7 @@ flowchart TB
 | Phase | "Done" means |
 |---|---|
 | **0 — App-level feature** | ✅ **Done & verified.** A valid ML-DSA-44 signature is accepted and a tampered one rejected — proven by unit + integration tests **and** live over RPC on a local `solana-test-validator` (a real ~3.9 KB signed transaction confirmed on-chain). Built on the `fips204` library; required raising the packet-size ceiling (1232 → 8192 bytes) so the larger signatures fit. The technology fits. |
-| **1 — User payments** | A wallet signs a transfer with the new scheme; the validator accepts it; basic send/receive/balance work on a single node. |
+| **1 — User payments** | ✅ **Done & verified.** A fee payer signs a SOL transfer with ML-DSA-44 (its address = sha256(public key)); the validator verifies, executes, and confirms it live on `solana-test-validator`, and rejects a forged one. **Coexists** with Ed25519 (votes/gossip/shreds unchanged); single-signer, legacy message for now. |
 | **2a — Votes** | The validator's consensus votes use the new scheme (rides Phase 1). |
 | **2b — Node chatter** | Validators sign and verify peer messages with the new scheme. |
 | **3 — Block broadcasting** | Blocks are signed/verified with the new scheme (likely per block, not per fragment). |
@@ -214,4 +214,4 @@ The new scheme follows **NIST FIPS 204** (finalized August 2024). We'll use a ma
 
 ---
 
-*Phase 0 (the app-level feature) has been built and verified end-to-end; the engineering details live in the repo's `CLAUDE.md` ("Post-quantum signatures" section). The original implementation plan drove the work. Next up: Phase 1 (user payments).*
+*Phases 0–1 (the app-level precompile, and post-quantum transaction signing for user payments) have been built and verified end-to-end; the engineering details live in the repo's `CLAUDE.md` ("Post-quantum signatures" + "Phase 1" sections). Next up: Phase 2 (votes), which rides the Phase 1 machinery.*

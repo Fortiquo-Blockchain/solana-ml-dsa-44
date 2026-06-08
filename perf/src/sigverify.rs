@@ -116,6 +116,14 @@ fn verify_packet(packet: &mut Packet, reject_non_vote: bool) -> bool {
         return false;
     }
 
+    // Post-quantum ML-DSA-44 transactions are tagged by a 0x00 lead byte, which a
+    // stock Ed25519 transaction never has (its first byte is a signature count of
+    // at least 1). Verify those on a dedicated CPU path. They are user payments,
+    // never votes, so reject them in vote-only mode.
+    if packet.data(0) == Some(&solana_sdk::ml_dsa_transaction::ML_DSA_TX_MARKER) {
+        return !reject_non_vote && verify_ml_dsa_packet(packet);
+    }
+
     let packet_offsets = get_packet_offsets(packet, 0, reject_non_vote);
     let mut sig_start = packet_offsets.sig_start as usize;
     let mut pubkey_start = packet_offsets.pubkey_start as usize;
@@ -150,6 +158,25 @@ fn verify_packet(packet: &mut Packet, reject_non_vote: bool) -> bool {
         sig_start = sig_end;
     }
     true
+}
+
+/// CPU verification of a post-quantum ML-DSA-44 transaction packet (0x00 marker).
+/// The crypto — ML-DSA signature check plus the `sha256(pubkey) == account_keys[i]`
+/// address binding — lives in `solana_sdk::ml_dsa_transaction` so there is a single
+/// implementation shared by the client, sigverify, and RPC preflight.
+///
+/// NOTE: ML-DSA packets are only handled on this CPU path. The GPU path
+/// (`ed25519_verify`) is dormant unless perf-libs is loaded; if it is ever enabled,
+/// `0x00`-marked packets must be filtered to CPU before GPU offset generation.
+#[must_use]
+fn verify_ml_dsa_packet(packet: &Packet) -> bool {
+    let Some(data) = packet.data(..) else {
+        return false;
+    };
+    match solana_sdk::ml_dsa_transaction::MlDsaTransaction::deserialize(data) {
+        Ok(tx) => tx.verify_offchain(),
+        Err(_) => false,
+    }
 }
 
 pub fn count_packets_in_batches(batches: &[PacketBatch]) -> usize {
@@ -839,6 +866,52 @@ mod tests {
 
         let res = sigverify::do_get_packet_offsets(&packet, 0);
         assert_eq!(res, Err(PacketError::InvalidLen));
+    }
+
+    #[test]
+    fn test_verify_ml_dsa_packet() {
+        use solana_sdk::{
+            ml_dsa_keypair::MlDsaKeypair, ml_dsa_transaction::MlDsaTransaction, system_instruction,
+        };
+
+        let payer = MlDsaKeypair::new().unwrap();
+        let recipient = Pubkey::new_unique();
+        let message = Message::new(
+            &[system_instruction::transfer(
+                &payer.address(),
+                &recipient,
+                1_000,
+            )],
+            Some(&payer.address()),
+        );
+        let mltx = MlDsaTransaction::sign(message, &[&payer]).unwrap();
+        let data = mltx.serialize();
+
+        // Write the raw ML-DSA wire bytes into a packet (NOT bincoded via from_data).
+        let make_packet = |bytes: &[u8]| {
+            let mut packet = Packet::from_data(None, 0u8).unwrap();
+            packet.buffer_mut()[..bytes.len()].copy_from_slice(bytes);
+            packet.meta_mut().size = bytes.len();
+            packet
+        };
+
+        // A valid ML-DSA packet verifies on the CPU path.
+        let mut packet = make_packet(&data);
+        assert!(verify_packet(&mut packet, false));
+
+        // Vote-only mode rejects it (a user payment is never a vote).
+        let mut packet = make_packet(&data);
+        assert!(!verify_packet(&mut packet, true));
+
+        // A tampered signature byte is rejected.
+        let mut bad = data.clone();
+        bad[2 + 50] ^= 0xff; // marker(1) + shortu16 count(1) -> inside the first signature
+        let mut packet = make_packet(&bad);
+        assert!(!verify_packet(&mut packet, false));
+
+        // Regression: a normal Ed25519 transfer still verifies.
+        let mut packet = Packet::from_data(None, test_tx()).unwrap();
+        assert!(verify_packet(&mut packet, false));
     }
 
     #[test]

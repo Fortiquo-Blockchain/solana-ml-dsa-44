@@ -6439,9 +6439,13 @@ name = "solana-ml-dsa-program-tests"
 version = "2.0.0"
 dependencies = [
  "assert_matches",
+ "base64 0.22.0",
+ "bincode",
  "fips204",
+ "serde_json",
  "solana-program-test",
  "solana-rpc-client",
+ "solana-rpc-client-api",
  "solana-sdk",
 ]
 
