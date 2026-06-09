@@ -69,19 +69,23 @@ fi
 MLDSA_ADDR="$(grep -oE 'voter address: [1-9A-HJ-NP-Za-km-z]+' "$VLOG" | head -1 | awk '{print $3}')"
 VOTE_PUBKEY="$(solana-keygen pubkey "$LEDGER/vote-account-keypair.json")"
 
-# lastVote for our vote account, straight from the getVoteAccounts RPC (processed
-# commitment so we see the freshest landed vote).
-get_last_vote() {
-    curl -s "$RPC" -X POST -H 'Content-Type: application/json' \
-        -d '{"jsonrpc":"2.0","id":1,"method":"getVoteAccounts","params":[{"commitment":"processed"}]}' \
-        | python3 -c "import sys,json
-d=json.load(sys.stdin)['result']
-accs=d['current']+d['delinquent']
-print(next((a['lastVote'] for a in accs if a['votePubkey']=='$VOTE_PUBKEY'), ''))"
+# Print a JSON-RPC request and the validator's raw response; stash it in LAST_RESP.
+rpc() {
+    local req="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}"
+    echo "    → JSON-RPC request:  $req"
+    LAST_RESP="$(curl -s "$RPC" -X POST -H 'Content-Type: application/json' -d "$req")"
+    echo "    ← raw result:        $LAST_RESP"
 }
+# Parse the slot number out of the last getSlot response.
+parse_slot() { echo "$LAST_RESP" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("result",0))' 2>/dev/null || echo 0; }
+# Parse our vote account's lastVote out of the last getVoteAccounts response.
+parse_last_vote() { echo "$LAST_RESP" | python3 -c "import sys,json
+d=json.load(sys.stdin).get('result',{})
+accs=d.get('current',[])+d.get('delinquent',[])
+print(next((a['lastVote'] for a in accs if a['votePubkey']=='$VOTE_PUBKEY'),''))" 2>/dev/null || echo ''; }
 
 echo
-echo "=== On-chain proof: the vote authority is a post-quantum address ==="
+echo "=== STEP 1: on-chain proof — the vote authority is a post-quantum address ==="
 echo "ML-DSA-44 voter address (sha256 of the PQ public key): ${MLDSA_ADDR:-<not found in log>}"
 echo "Validator vote account:                                $VOTE_PUBKEY"
 echo
@@ -93,25 +97,47 @@ echo " for it -- it is sha256(ML-DSA public key) -- so the only way it can vote 
 echo " post-quantum signatures.)"
 
 echo
-echo "=== Liveness: consensus advances on post-quantum (ML-DSA-44) votes ==="
-# Optimistic confirmation needs ~30 slots of votes to warm up, so wait until the
-# confirmed slot first moves off 0 before taking the 'before' sample.
+echo "=== STEP 2: what is (and isn't) reduced — key & signature sizes ==="
+PK_LEN=1312; SK_LEN=2560; SIG_LEN=2420            # FIPS 204 ML-DSA-44 (fixed constants)
+RAW_LEN=$((PK_LEN + SK_LEN))                      # raw keypair material = 3872 B
+KF_LEN="$(stat -c%s "$KEYFILE" 2>/dev/null || echo '?')"
+echo "  public key:   Ed25519   32 B   ->   ML-DSA-44 ${PK_LEN} B   (carried FULL-SIZE in every tx; NOT reduced)"
+echo "  signature:    Ed25519   64 B   ->   ML-DSA-44 ${SIG_LEN} B   (carried FULL-SIZE in every tx; NOT reduced)"
+echo "  address:      Ed25519   32 B   ->   ML-DSA-44   32 B   <== the ONLY reduction: sha256(public key)"
+echo "  raw key material: ${RAW_LEN} B  =  ${PK_LEN} B public key  +  ${SK_LEN} B secret key"
+echo "  on-disk keyfile:  ${KF_LEN} B  (JSON byte-array, same shape as a Solana keypair file)"
+echo
+echo "  The public key and signature are NOT shrunk -- verification needs them whole. Only"
+echo "  the 32-byte ADDRESS is reduced, by hashing the full public key, which still travels"
+echo "  inside the transaction. (This is why the packet ceiling was raised 1232 -> 8192.)"
+
+echo
+echo "=== STEP 3: liveness — consensus advances on post-quantum (ML-DSA-44) votes ==="
+echo "Each reading below shows the raw JSON-RPC call and the validator's raw reply."
+# Optimistic confirmation needs ~30 slots of votes to warm up, so wait (quietly) until
+# the confirmed slot first moves off 0 before taking the 'before' sample.
 echo "Waiting for the first confirmed slot (votes warming up) ..."
 for _ in $(seq 1 40); do
-    c="$(solana slot --commitment confirmed 2>/dev/null || echo 0)"
+    c="$(curl -s "$RPC" -X POST -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[{"commitment":"confirmed"}]}' \
+        2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("result",0))' 2>/dev/null || echo 0)"
     [ "${c:-0}" -gt 0 ] 2>/dev/null && break
     sleep 1
 done
 
-proc1="$(solana slot --commitment processed 2>/dev/null || echo 0)"
-conf1="$(solana slot --commitment confirmed 2>/dev/null || echo 0)"
-fin1="$(solana slot --commitment finalized 2>/dev/null || echo 0)"
-last1="$(get_last_vote)"
+echo "  -- BEFORE sample --"
+rpc getSlot '[{"commitment":"processed"}]';          proc1="$(parse_slot)"
+rpc getSlot '[{"commitment":"confirmed"}]';          conf1="$(parse_slot)"
+rpc getSlot '[{"commitment":"finalized"}]';          fin1="$(parse_slot)"
+rpc getVoteAccounts '[{"commitment":"processed"}]';  last1="$(parse_last_vote)"
 sleep 15
-proc2="$(solana slot --commitment processed 2>/dev/null || echo 0)"
-conf2="$(solana slot --commitment confirmed 2>/dev/null || echo 0)"
-fin2="$(solana slot --commitment finalized 2>/dev/null || echo 0)"
-last2="$(get_last_vote)"
+echo "  -- AFTER sample (~15s later) --"
+rpc getSlot '[{"commitment":"processed"}]';          proc2="$(parse_slot)"
+rpc getSlot '[{"commitment":"confirmed"}]';          conf2="$(parse_slot)"
+rpc getSlot '[{"commitment":"finalized"}]';          fin2="$(parse_slot)"
+rpc getVoteAccounts '[{"commitment":"processed"}]';  last2="$(parse_last_vote)"
+
+echo
 echo "processed slot:  $proc1  ->  $proc2   (advancing => blocks are being produced)"
 echo "confirmed slot:  $conf1  ->  $conf2   (advancing => PQ votes optimistically confirm)"
 echo "finalized slot:  $fin1  ->  $fin2   (advancing => the chain ROOTS on PQ votes)"

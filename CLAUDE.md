@@ -124,6 +124,38 @@ bash programs/ml-dsa-tests/demo-vote.sh                       # live: PQ vote au
 ```
 Verified live: with `--ml-dsa-vote`, the vote account's authorized voter is the post-quantum address and processed/confirmed/finalized slots + the vote account's `lastVote`/root all advance (the chain roots on ML-DSA votes); without the flag, Ed25519 voting is unchanged.
 
+## Running the demos — combined script vs. two terminals
+All three live demos (`programs/ml-dsa-tests/demo.sh` Phase 0, `demo-transfer.sh` Phase 1, `demo-vote.sh` Phase 2) print the full keys/signatures and the **raw JSON-RPC request + response at every chain interaction** (so nothing is faked). Run any of them **two ways** from a WSL shell (bash only):
+
+**A) One combined script** — boots a throwaway validator, runs the demo, tears it down:
+```bash
+bash programs/ml-dsa-tests/demo.sh           # Phase 0 — precompile verifies a PQ signature
+bash programs/ml-dsa-tests/demo-transfer.sh  # Phase 1 — a PQ-signed SOL transfer
+bash programs/ml-dsa-tests/demo-vote.sh      # Phase 2 — the validator's own votes are PQ
+```
+Pass `--build` after editing Rust to force cargo (otherwise it skips cargo when the binaries exist; only changed crates recompile). `--build` on the Phase 1/2 scripts rebuilds `solana-test-validator` → recompiles `solana-core`; to iterate on just an example, run `cargo build --release --example <name>` and then the script **without** `--build`.
+
+**B) Two terminals** — a long-running chain you re-run tests against.
+Phase 0 / Phase 1 (plain validator + the example binary):
+```bash
+# Terminal 1 (the chain) — leave running:
+export PATH="$PWD/target/release:$PATH"
+solana-test-validator --reset --ledger ~/solana-test-ledger
+# Terminal 2 (the test) — re-runnable; each run mints fresh wallets + airdrops:
+./target/release/examples/submit_live        # Phase 0
+./target/release/examples/ml_dsa_transfer    # Phase 1
+```
+Phase 2 (the votes happen *inside* the validator, so the flag is on the chain; observe from the other terminal):
+```bash
+# Terminal 1 (the chain, voting post-quantum) — leave running:
+solana-test-validator --reset --ledger ~/solana-test-ledger-mldsa-vote --ml-dsa-vote /tmp/mldsa-vote.bin
+# Terminal 2 (observe) — slots + the vote account's lastVote keep climbing:
+solana slot --commitment finalized
+curl -s http://127.0.0.1:8899 -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getVoteAccounts","params":[{"commitment":"processed"}]}'
+```
+Keep ledgers on ext4 (`~/...`), not `/mnt/d`, for speed. Phase 0/1 need only a plain validator; `--ml-dsa-vote` is Phase 2 only. The examples connect to `127.0.0.1:8899`.
+
 ## Don't
 - Don't build from native Windows/PowerShell (symlinks are WSL-style; the validator is unsupported on Windows).
 - Don't run the bash scripts (`multinode-demo/*`, `scripts/cargo-install-all.sh`) from PowerShell — they are bash-only.
