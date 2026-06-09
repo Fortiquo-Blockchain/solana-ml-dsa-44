@@ -106,6 +106,24 @@ cargo test -p solana-runtime test_ml_dsa_transfer_executes   # bank execution
 bash programs/ml-dsa-tests/demo-transfer.sh                  # live: an ML-DSA transfer confirms, a forged one is rejected
 ```
 
+## Post-quantum validator votes (Phase 2) — done & verified
+Building on Phase 1, **the validator's own consensus votes can now be signed with ML-DSA-44 instead of Ed25519** — the third signing surface (and the first *consensus* one). It is **flag-gated and coexists**: default **off** = byte-for-byte unchanged Ed25519 voting (so the single-node validator never stalls); **on** = post-quantum votes. The node identity (gossip/shreds) stays Ed25519.
+
+- **Single-signer fit:** a vote needs exactly one signer when the ML-DSA voter is *both* the fee payer *and* the authorized voter (`to_vote_instruction` makes the authorized voter the signer, not the vote account) ⇒ `num_required_signatures == 1`, which is exactly what `MlDsaTransaction::sign` accepts. No multi-signer extension needed.
+- **Vote construction** (`core/src/replay_stage.rs`, `generate_vote_tx`): when `ml_dsa_voter` is set and it equals the vote account's authorized voter, build the vote instruction with the ML-DSA address as payer+authority, wrap it as a Phase 1 `0x00` `MlDsaTransaction`, and return a new `GenerateVoteTxResult::MlDsaTx(wire, blockhash)`. Tower save / `vote_signatures` (synthetic ids) are unchanged. Emits a per-vote `info!("Signed ML-DSA-44 … vote …")`.
+- **Routing** (`core/src/voting_service.rs` + `gossip/src/cluster_info.rs`): new `VoteOp::{Push,Refresh}MlDsaVote{wire,…}` submit the raw bytes via `cluster_info.send_transaction_raw(&wire, None)` to the node's **own regular TPU** — **never** the vote-only port (Phase 1 sigverify rejects `0x00` there) nor gossip CRDS (typed to Ed25519 `Transaction`). From there it rides the Phase 1 regular-path sigverify → banking `new_ml_dsa` bridge → the vote instruction executes and updates the vote account.
+- **Plumbing:** `ml_dsa_voter: Option<Arc<MlDsaKeypair>>` is carried on `ValidatorConfig` → `Tvu::new` → `ReplayStageConfig` (`None` everywhere else; `safe_clone_config` updated). `solana-test-validator` gets a **`--ml-dsa-vote <KEYFILE>`** flag (`validator/src/cli.rs` + `validator/src/bin/solana-test-validator.rs`) that loads or mints the keypair.
+- **Genesis** (`test-validator/src/lib.rs`, new `solana-vote-program` dep): when `ml_dsa_voter` is set, the genesis vote account's `authorized_voter` is repointed to the ML-DSA address (node_pubkey stays the identity — `replay_stage` asserts that), the address is funded, and **`tpu_enable_udp` is forced on** (the regular TPU only ingests UDP when enabled; default is QUIC-only, which silently drops the raw-UDP vote packets).
+- **⚠️ Caveats (Phase-2 PoC):** ML-DSA votes ride the **regular TPU over UDP** and do **not** propagate via gossip CRDS — fine single-node; a multi-node cluster would only observe them via block replay. Each vote pays a normal ~5000-lamport fee (genesis funds the address with 1M SOL); stock votes are feeless. Same Phase-1 CPU-sigverify caveat (GPU path drops `0x00`). One `authorized_voter` per epoch ⇒ no live Ed25519↔ML-DSA hot-swap; switching is a flag-gated restart.
+
+Test it:
+```bash
+cargo build --release --bin solana-test-validator            # picks up the --ml-dsa-vote flag
+bash programs/ml-dsa-tests/demo-vote.sh                       # live: PQ vote authority, chain confirms+finalizes on ML-DSA votes
+# baseline regression: start solana-test-validator WITHOUT the flag => Ed25519 voting finalizes, zero ML-DSA activity
+```
+Verified live: with `--ml-dsa-vote`, the vote account's authorized voter is the post-quantum address and processed/confirmed/finalized slots + the vote account's `lastVote`/root all advance (the chain roots on ML-DSA votes); without the flag, Ed25519 voting is unchanged.
+
 ## Don't
 - Don't build from native Windows/PowerShell (symlinks are WSL-style; the validator is unsupported on Windows).
 - Don't run the bash scripts (`multinode-demo/*`, `scripts/cargo-install-all.sh`) from PowerShell — they are bash-only.

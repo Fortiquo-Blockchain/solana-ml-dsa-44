@@ -1148,6 +1148,20 @@ impl ClusterInfo {
         Ok(())
     }
 
+    /// Send already-serialized transaction wire bytes (e.g. a post-quantum ML-DSA `0x00`
+    /// transaction) to a TPU. `None` targets this node's own regular (non-vote) TPU.
+    pub fn send_transaction_raw(
+        &self,
+        wire: &[u8],
+        tpu: Option<SocketAddr>,
+    ) -> Result<(), GossipError> {
+        let tpu = tpu
+            .map(Ok)
+            .unwrap_or_else(|| self.my_contact_info().tpu(contact_info::Protocol::UDP))?;
+        self.socket.send_to(wire, tpu)?;
+        Ok(())
+    }
+
     /// Returns votes inserted since the given cursor.
     pub fn get_votes(&self, cursor: &mut Cursor) -> Vec<Transaction> {
         let txs: Vec<Transaction> = self

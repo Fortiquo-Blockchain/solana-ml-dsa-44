@@ -20,6 +20,7 @@ use {
         clock::Slot,
         epoch_schedule::EpochSchedule,
         feature_set,
+        ml_dsa_keypair::{read_ml_dsa_keypair_file, write_ml_dsa_keypair_file, MlDsaKeypair},
         native_token::sol_to_lamports,
         pubkey::Pubkey,
         rent::Rent,
@@ -557,6 +558,33 @@ fn main() {
 
     if let Some(compute_unit_limit) = compute_unit_limit {
         genesis.compute_unit_limit(compute_unit_limit);
+    }
+
+    // Phase 2 (post-quantum): --ml-dsa-vote <KEYFILE> signs consensus votes with ML-DSA-44.
+    // The keyfile is loaded if it exists, otherwise a new keypair is generated and written.
+    if let Some(ml_dsa_vote_keyfile) = matches.value_of("ml_dsa_vote") {
+        let ml_dsa_keypair = if Path::new(ml_dsa_vote_keyfile).exists() {
+            read_ml_dsa_keypair_file(ml_dsa_vote_keyfile).unwrap_or_else(|err| {
+                println!("Error: failed to read ML-DSA keypair file {ml_dsa_vote_keyfile}: {err}");
+                exit(1);
+            })
+        } else {
+            let kp = MlDsaKeypair::new().unwrap_or_else(|err| {
+                println!("Error: failed to generate ML-DSA keypair: {err}");
+                exit(1);
+            });
+            write_ml_dsa_keypair_file(&kp, ml_dsa_vote_keyfile).unwrap_or_else(|err| {
+                println!("Error: failed to write ML-DSA keypair file {ml_dsa_vote_keyfile}: {err}");
+                exit(1);
+            });
+            println!("Generated new ML-DSA-44 vote keypair at {ml_dsa_vote_keyfile}");
+            kp
+        };
+        println!(
+            "Post-quantum voting enabled (ML-DSA-44); voter address: {}",
+            ml_dsa_keypair.address()
+        );
+        genesis.ml_dsa_voter(Arc::new(ml_dsa_keypair));
     }
 
     match genesis.start_with_mint_address_and_geyser_plugin_rpc(

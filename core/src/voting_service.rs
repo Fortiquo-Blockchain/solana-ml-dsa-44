@@ -24,15 +24,17 @@ pub enum VoteOp {
         tx: Transaction,
         last_voted_slot: Slot,
     },
-}
-
-impl VoteOp {
-    fn tx(&self) -> &Transaction {
-        match self {
-            VoteOp::PushVote { tx, .. } => tx,
-            VoteOp::RefreshVote { tx, .. } => tx,
-        }
-    }
+    // Post-quantum ML-DSA-44 votes: raw 0x00 wire bytes, submitted to the node's own
+    // regular TPU (never the vote-only port or gossip CRDS, which are Ed25519-typed).
+    PushMlDsaVote {
+        wire: Vec<u8>,
+        tower_slots: Vec<Slot>,
+        saved_tower: SavedTowerVersions,
+    },
+    RefreshMlDsaVote {
+        wire: Vec<u8>,
+        last_voted_slot: Slot,
+    },
 }
 
 pub struct VotingService {
@@ -68,7 +70,14 @@ impl VotingService {
         tower_storage: &dyn TowerStorage,
         vote_op: VoteOp,
     ) {
-        if let VoteOp::PushVote { saved_tower, .. } = &vote_op {
+        // Persist the tower for any push vote (Ed25519 or ML-DSA).
+        let saved_tower = match &vote_op {
+            VoteOp::PushVote { saved_tower, .. } | VoteOp::PushMlDsaVote { saved_tower, .. } => {
+                Some(saved_tower)
+            }
+            _ => None,
+        };
+        if let Some(saved_tower) = saved_tower {
             let mut measure = Measure::start("tower_save-ms");
             if let Err(err) = tower_storage.store(saved_tower) {
                 error!("Unable to save tower to storage: {:?}", err);
@@ -78,23 +87,32 @@ impl VotingService {
             inc_new_counter_info!("tower_save-ms", measure.as_ms() as usize);
         }
 
-        let _ = cluster_info.send_transaction(
-            vote_op.tx(),
-            next_leader_tpu_vote(cluster_info, poh_recorder)
-                .map(|(_pubkey, target_addr)| target_addr),
-        );
-
         match vote_op {
             VoteOp::PushVote {
                 tx, tower_slots, ..
             } => {
+                let _ = cluster_info.send_transaction(
+                    &tx,
+                    next_leader_tpu_vote(cluster_info, poh_recorder)
+                        .map(|(_pubkey, target_addr)| target_addr),
+                );
                 cluster_info.push_vote(&tower_slots, tx);
             }
             VoteOp::RefreshVote {
                 tx,
                 last_voted_slot,
             } => {
+                let _ = cluster_info.send_transaction(
+                    &tx,
+                    next_leader_tpu_vote(cluster_info, poh_recorder)
+                        .map(|(_pubkey, target_addr)| target_addr),
+                );
                 cluster_info.refresh_vote(tx, last_voted_slot);
+            }
+            // ML-DSA votes go to the node's OWN regular TPU (None target), never the
+            // vote-only port (Phase 1 sigverify rejects 0x00 there) nor gossip CRDS.
+            VoteOp::PushMlDsaVote { wire, .. } | VoteOp::RefreshMlDsaVote { wire, .. } => {
+                let _ = cluster_info.send_transaction_raw(&wire, None);
             }
         }
     }

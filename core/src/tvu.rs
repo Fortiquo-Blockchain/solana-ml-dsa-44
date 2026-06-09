@@ -47,7 +47,9 @@ use {
         accounts_background_service::AbsRequestSender, bank_forks::BankForks,
         commitment::BlockCommitmentCache, prioritization_fee_cache::PrioritizationFeeCache,
     },
-    solana_sdk::{clock::Slot, pubkey::Pubkey, signature::Keypair},
+    solana_sdk::{
+        clock::Slot, ml_dsa_keypair::MlDsaKeypair, pubkey::Pubkey, signature::Keypair,
+    },
     solana_turbine::retransmit_stage::RetransmitStage,
     solana_vote::vote_sender_types::ReplayVoteSender,
     std::{
@@ -104,6 +106,7 @@ impl Tvu {
     pub fn new(
         vote_account: &Pubkey,
         authorized_voter_keypairs: Arc<RwLock<Vec<Arc<Keypair>>>>,
+        ml_dsa_voter: Option<Arc<MlDsaKeypair>>,
         bank_forks: &Arc<RwLock<BankForks>>,
         cluster_info: &Arc<ClusterInfo>,
         sockets: TvuSockets,
@@ -251,6 +254,7 @@ impl Tvu {
         let replay_stage_config = ReplayStageConfig {
             vote_account: *vote_account,
             authorized_voter_keypairs,
+            ml_dsa_voter,
             exit: exit.clone(),
             rpc_subscriptions: rpc_subscriptions.clone(),
             leader_schedule_cache: leader_schedule_cache.clone(),
@@ -448,6 +452,7 @@ pub mod tests {
         let tvu = Tvu::new(
             &vote_keypair.pubkey(),
             Arc::new(RwLock::new(vec![Arc::new(vote_keypair)])),
+            None, // ml_dsa_voter: Ed25519 path in tests
             &bank_forks,
             &cref1,
             {

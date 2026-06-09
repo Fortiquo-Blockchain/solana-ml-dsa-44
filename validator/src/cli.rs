@@ -2675,6 +2675,19 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                 .help("Keep this amount of shreds in root slots."),
         )
         .arg(
+            Arg::with_name("ml_dsa_vote")
+                .long("ml-dsa-vote")
+                .value_name("KEYFILE")
+                .takes_value(true)
+                .help(
+                    "Phase 2 (post-quantum): sign this validator's consensus votes with the \
+                     ML-DSA-44 key at KEYFILE instead of Ed25519. If KEYFILE does not exist, a \
+                     new ML-DSA-44 keypair is generated and written there. The genesis vote \
+                     account's authorized_voter is set to the key's address and that address is \
+                     funded. Omit this flag for unchanged Ed25519 voting.",
+                ),
+        )
+        .arg(
             Arg::with_name("faucet_sol")
                 .long("faucet-sol")
                 .takes_value(true)

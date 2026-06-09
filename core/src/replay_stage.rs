@@ -72,6 +72,9 @@ use {
         hash::Hash,
         pubkey::Pubkey,
         saturating_add_assign,
+        message::Message,
+        ml_dsa_keypair::MlDsaKeypair,
+        ml_dsa_transaction::MlDsaTransaction,
         signature::{Keypair, Signature, Signer},
         timing::timestamp,
         transaction::Transaction,
@@ -140,6 +143,8 @@ enum GenerateVoteTxResult {
     // failed generation, eligible for refresh
     Failed,
     Tx(Transaction),
+    // Post-quantum ML-DSA-44 vote: serialized 0x00 wire bytes + recent blockhash.
+    MlDsaTx(Vec<u8>, Hash),
 }
 
 impl GenerateVoteTxResult {
@@ -275,6 +280,9 @@ impl PartitionInfo {
 pub struct ReplayStageConfig {
     pub vote_account: Pubkey,
     pub authorized_voter_keypairs: Arc<RwLock<Vec<Arc<Keypair>>>>,
+    // Phase 2: when `Some`, the validator signs its votes with this post-quantum
+    // ML-DSA-44 key (its address must be the vote account's authorized voter).
+    pub ml_dsa_voter: Option<Arc<MlDsaKeypair>>,
     pub exit: Arc<AtomicBool>,
     pub rpc_subscriptions: Arc<RpcSubscriptions>,
     pub leader_schedule_cache: Arc<LeaderScheduleCache>,
@@ -560,6 +568,7 @@ impl ReplayStage {
         let ReplayStageConfig {
             vote_account,
             authorized_voter_keypairs,
+            ml_dsa_voter,
             exit,
             rpc_subscriptions,
             leader_schedule_cache,
@@ -936,6 +945,7 @@ impl ReplayStage {
                                 &vote_account,
                                 &identity_keypair,
                                 &authorized_voter_keypairs.read().unwrap(),
+                                ml_dsa_voter.as_ref(),
                                 &mut voted_signatures,
                                 has_new_vote_been_rooted,
                                 &mut last_vote_refresh_time,
@@ -989,6 +999,7 @@ impl ReplayStage {
                         &vote_account,
                         &identity_keypair,
                         &authorized_voter_keypairs.read().unwrap(),
+                        ml_dsa_voter.as_ref(),
                         &blockstore,
                         &leader_schedule_cache,
                         &lockouts_sender,
@@ -2288,6 +2299,7 @@ impl ReplayStage {
         vote_account_pubkey: &Pubkey,
         identity_keypair: &Keypair,
         authorized_voter_keypairs: &[Arc<Keypair>],
+        ml_dsa_voter: Option<&Arc<MlDsaKeypair>>,
         blockstore: &Blockstore,
         leader_schedule_cache: &Arc<LeaderScheduleCache>,
         lockouts_sender: &Sender<CommitmentAggregationData>,
@@ -2398,6 +2410,7 @@ impl ReplayStage {
             vote_account_pubkey,
             identity_keypair,
             authorized_voter_keypairs,
+            ml_dsa_voter,
             tower,
             switch_fork_decision,
             vote_signatures,
@@ -2413,6 +2426,7 @@ impl ReplayStage {
         bank: &Bank,
         vote_account_pubkey: &Pubkey,
         authorized_voter_keypairs: &[Arc<Keypair>],
+        ml_dsa_voter: Option<&Arc<MlDsaKeypair>>,
         vote: VoteTransaction,
         switch_fork_decision: &SwitchForkDecision,
         vote_signatures: &mut Vec<Signature>,
@@ -2472,6 +2486,55 @@ impl ReplayStage {
             return GenerateVoteTxResult::Failed;
         };
 
+        // Post-quantum (ML-DSA-44) vote path: the vote account's authorized voter is an
+        // ML-DSA address. Build the vote as a single-signer 0x00 transaction where the
+        // ML-DSA voter is BOTH the fee payer and the vote authority, so it rides the
+        // Phase 1 machinery on the regular TPU. The node identity is not a signer.
+        if let Some(ml_dsa_voter) = ml_dsa_voter {
+            if ml_dsa_voter.address() != authorized_voter_pubkey {
+                warn!(
+                    "ML-DSA voter {} is not the authorized voter {} for vote account {}.  Unable to vote",
+                    ml_dsa_voter.address(),
+                    authorized_voter_pubkey,
+                    vote_account_pubkey,
+                );
+                return GenerateVoteTxResult::NonVoting;
+            }
+            let vote = match vote {
+                VoteTransaction::VoteStateUpdate(vote_state_update) => {
+                    VoteTransaction::CompactVoteStateUpdate(vote_state_update)
+                }
+                vote => vote,
+            };
+            let vote_ix = switch_fork_decision
+                .to_vote_instruction(vote, vote_account_pubkey, &ml_dsa_voter.address())
+                .expect("Switch threshold failure should not lead to voting");
+            let blockhash = bank.last_blockhash();
+            let mut message = Message::new(&[vote_ix], Some(&ml_dsa_voter.address()));
+            message.recent_blockhash = blockhash;
+            let mltx = match MlDsaTransaction::sign(message, &[ml_dsa_voter.as_ref()]) {
+                Ok(tx) => tx,
+                Err(err) => {
+                    warn!("Failed to sign ML-DSA vote: {err}");
+                    return GenerateVoteTxResult::Failed;
+                }
+            };
+            info!(
+                "Signed ML-DSA-44 (post-quantum) vote: bank slot {}, voter {}",
+                bank.slot(),
+                ml_dsa_voter.address(),
+            );
+            if !has_new_vote_been_rooted {
+                vote_signatures.push(mltx.synthetic_signature());
+                if vote_signatures.len() > MAX_VOTE_SIGNATURES {
+                    vote_signatures.remove(0);
+                }
+            } else {
+                vote_signatures.clear();
+            }
+            return GenerateVoteTxResult::MlDsaTx(mltx.serialize(), blockhash);
+        }
+
         let authorized_voter_keypair = match authorized_voter_keypairs
             .iter()
             .find(|keypair| keypair.pubkey() == authorized_voter_pubkey)
@@ -2526,6 +2589,7 @@ impl ReplayStage {
         vote_account_pubkey: &Pubkey,
         identity_keypair: &Keypair,
         authorized_voter_keypairs: &[Arc<Keypair>],
+        ml_dsa_voter: Option<&Arc<MlDsaKeypair>>,
         vote_signatures: &mut Vec<Signature>,
         has_new_vote_been_rooted: bool,
         last_vote_refresh_time: &mut LastVoteRefreshTime,
@@ -2592,6 +2656,7 @@ impl ReplayStage {
             heaviest_bank_on_same_fork,
             vote_account_pubkey,
             authorized_voter_keypairs,
+            ml_dsa_voter,
             tower.last_vote(),
             &SwitchForkDecision::SameFork,
             vote_signatures,
@@ -2599,27 +2664,49 @@ impl ReplayStage {
             wait_to_vote_slot,
         );
 
-        if let GenerateVoteTxResult::Tx(vote_tx) = vote_tx_result {
-            let recent_blockhash = vote_tx.message.recent_blockhash;
-            tower.refresh_last_vote_tx_blockhash(recent_blockhash);
-
-            // Send the votes to the TPU and gossip for network propagation
-            let hash_string = format!("{recent_blockhash}");
-            datapoint_info!(
-                "refresh_vote",
-                ("last_voted_slot", last_voted_slot, i64),
-                ("target_bank_slot", heaviest_bank_on_same_fork.slot(), i64),
-                ("target_bank_hash", hash_string, String),
-            );
-            voting_sender
-                .send(VoteOp::RefreshVote {
-                    tx: vote_tx,
-                    last_voted_slot,
-                })
-                .unwrap_or_else(|err| warn!("Error: {:?}", err));
-            last_vote_refresh_time.last_refresh_time = Instant::now();
-        } else if vote_tx_result.is_non_voting() {
-            tower.mark_last_vote_tx_blockhash_non_voting();
+        match vote_tx_result {
+            GenerateVoteTxResult::Tx(vote_tx) => {
+                let recent_blockhash = vote_tx.message.recent_blockhash;
+                tower.refresh_last_vote_tx_blockhash(recent_blockhash);
+                // Send the votes to the TPU and gossip for network propagation
+                let hash_string = format!("{recent_blockhash}");
+                datapoint_info!(
+                    "refresh_vote",
+                    ("last_voted_slot", last_voted_slot, i64),
+                    ("target_bank_slot", heaviest_bank_on_same_fork.slot(), i64),
+                    ("target_bank_hash", hash_string, String),
+                );
+                voting_sender
+                    .send(VoteOp::RefreshVote {
+                        tx: vote_tx,
+                        last_voted_slot,
+                    })
+                    .unwrap_or_else(|err| warn!("Error: {:?}", err));
+                last_vote_refresh_time.last_refresh_time = Instant::now();
+            }
+            GenerateVoteTxResult::MlDsaTx(wire, blockhash) => {
+                tower.refresh_last_vote_tx_blockhash(blockhash);
+                // Mirror the Ed25519 refresh telemetry so ML-DSA vote refreshes also show
+                // up in the `refresh_vote` datapoint.
+                let hash_string = format!("{blockhash}");
+                datapoint_info!(
+                    "refresh_vote",
+                    ("last_voted_slot", last_voted_slot, i64),
+                    ("target_bank_slot", heaviest_bank_on_same_fork.slot(), i64),
+                    ("target_bank_hash", hash_string, String),
+                );
+                voting_sender
+                    .send(VoteOp::RefreshMlDsaVote {
+                        wire,
+                        last_voted_slot,
+                    })
+                    .unwrap_or_else(|err| warn!("Error: {:?}", err));
+                last_vote_refresh_time.last_refresh_time = Instant::now();
+            }
+            GenerateVoteTxResult::NonVoting => {
+                tower.mark_last_vote_tx_blockhash_non_voting();
+            }
+            GenerateVoteTxResult::Failed => {}
         }
     }
 
@@ -2629,6 +2716,7 @@ impl ReplayStage {
         vote_account_pubkey: &Pubkey,
         identity_keypair: &Keypair,
         authorized_voter_keypairs: &[Arc<Keypair>],
+        ml_dsa_voter: Option<&Arc<MlDsaKeypair>>,
         tower: &mut Tower,
         switch_fork_decision: &SwitchForkDecision,
         vote_signatures: &mut Vec<Signature>,
@@ -2643,6 +2731,7 @@ impl ReplayStage {
             bank,
             vote_account_pubkey,
             authorized_voter_keypairs,
+            ml_dsa_voter,
             tower.last_vote(),
             switch_fork_decision,
             vote_signatures,
@@ -2651,24 +2740,41 @@ impl ReplayStage {
         );
         generate_time.stop();
         replay_timing.generate_vote_us += generate_time.as_us();
-        if let GenerateVoteTxResult::Tx(vote_tx) = vote_tx_result {
-            tower.refresh_last_vote_tx_blockhash(vote_tx.message.recent_blockhash);
-
-            let saved_tower = SavedTower::new(tower, identity_keypair).unwrap_or_else(|err| {
+        let make_saved_tower = |tower: &mut Tower| {
+            SavedTowerVersions::from(SavedTower::new(tower, identity_keypair).unwrap_or_else(|err| {
                 error!("Unable to create saved tower: {:?}", err);
                 std::process::exit(1);
-            });
-
-            let tower_slots = tower.tower_slots();
-            voting_sender
-                .send(VoteOp::PushVote {
-                    tx: vote_tx,
-                    tower_slots,
-                    saved_tower: SavedTowerVersions::from(saved_tower),
-                })
-                .unwrap_or_else(|err| warn!("Error: {:?}", err));
-        } else if vote_tx_result.is_non_voting() {
-            tower.mark_last_vote_tx_blockhash_non_voting();
+            }))
+        };
+        match vote_tx_result {
+            GenerateVoteTxResult::Tx(vote_tx) => {
+                tower.refresh_last_vote_tx_blockhash(vote_tx.message.recent_blockhash);
+                let saved_tower = make_saved_tower(tower);
+                let tower_slots = tower.tower_slots();
+                voting_sender
+                    .send(VoteOp::PushVote {
+                        tx: vote_tx,
+                        tower_slots,
+                        saved_tower,
+                    })
+                    .unwrap_or_else(|err| warn!("Error: {:?}", err));
+            }
+            GenerateVoteTxResult::MlDsaTx(wire, blockhash) => {
+                tower.refresh_last_vote_tx_blockhash(blockhash);
+                let saved_tower = make_saved_tower(tower);
+                let tower_slots = tower.tower_slots();
+                voting_sender
+                    .send(VoteOp::PushMlDsaVote {
+                        wire,
+                        tower_slots,
+                        saved_tower,
+                    })
+                    .unwrap_or_else(|err| warn!("Error: {:?}", err));
+            }
+            GenerateVoteTxResult::NonVoting => {
+                tower.mark_last_vote_tx_blockhash_non_voting();
+            }
+            GenerateVoteTxResult::Failed => {}
         }
     }
 

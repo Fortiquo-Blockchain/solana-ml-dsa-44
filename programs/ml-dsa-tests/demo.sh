@@ -13,9 +13,21 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO"
 export PATH="$REPO/target/release:$PATH"
 
-echo "Building the validator + demo (instant if already built) ..."
-cargo build --release --bin solana-test-validator >/dev/null 2>&1
-cargo build --release -p solana-ml-dsa-program-tests --example submit_live >/dev/null 2>&1
+# Freshness: cargo itself is the only reliable judge. For speed this script SKIPS cargo
+# when the binaries exist -- which does NOT detect stale code -- so after editing Rust,
+# pass --build to force cargo to re-check (only changed crates recompile):
+#   bash programs/ml-dsa-tests/demo.sh --build
+# NOTE: one cargo invocation builds both targets; two separate ones recompile everything.
+build_targets() { cargo build --release --bin solana-test-validator --example submit_live; }
+if [ "${1:-}" = "--build" ]; then
+    echo "Building (cargo re-checks freshness; only changed crates recompile) ..."
+    build_targets
+elif [ ! -x target/release/solana-test-validator ] || [ ! -x target/release/examples/submit_live ]; then
+    echo "Binaries missing -- first-time build (~10-15 min; progress below) ..."
+    build_targets
+else
+    echo "Binaries present -- skipping cargo (re-run with --build after Rust code changes)."
+fi
 
 echo "Starting a fresh local validator ..."
 rm -rf ~/solana-test-ledger
