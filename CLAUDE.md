@@ -7,7 +7,7 @@ This repo is edited on Windows but builds/runs in WSL. Keep the three roles sepa
 
 | Role | Launch from | Runs in | For |
 |---|---|---|---|
-| **Claude Code** (this agent) | a **Windows** terminal (PowerShell): `cd D:\Work\infinia\solana` → `claude` | Windows | driving work; runs builds/git via `wsl …` |
+| **Claude Code** (this agent) | a **Windows** terminal (PowerShell): `cd D:\Work\infinia\solana-ml-dsa-44` → `claude` | Windows | driving work; runs builds/git via `wsl …` |
 | **Cursor** (editor + rust-analyzer) | a **WSL** shell: `cursor .` | Remote-WSL | reading/editing code |
 | **Build / run / git** | a **WSL** shell (or Cursor's terminal) | WSL | `cargo`, `solana-test-validator`, `git` |
 
@@ -15,13 +15,13 @@ Same files underneath (`/mnt/d` = `D:\`), so edits stay in sync.
 
 **Rules:**
 - **Run `claude` only from a Windows terminal** — Cursor's built-in terminal is a WSL shell with no Claude installed (`claude: command not found`).
-- **Use WSL git for this repo, never Windows git.** Repo-local `core.symlinks=true` + `core.autocrlf=input` are set; Windows git would re-break the symlinks (shows them "type changed") and churn line-endings. When this agent runs git here, it routes through `wsl` (e.g. `wsl -e bash -lc 'cd /mnt/d/Work/infinia/solana && git …'`).
+- **Use WSL git for this repo, never Windows git.** Repo-local `core.symlinks=true` + `core.autocrlf=input` are set; Windows git would re-break the symlinks (shows them "type changed") and churn line-endings. When this agent runs git here, it routes through `wsl` (e.g. `wsl -e bash -lc 'cd /mnt/d/Work/infinia/solana-ml-dsa-44 && git …'`).
 - **Always open Cursor via Remote-WSL** (`cursor .` from WSL), never as a plain Windows folder — Windows can't read the 26 WSL-native symlinks (`*/build.rs`, a few `.sh`, `sdk/package.json`), so opening those files errors. `cargo` in WSL reads them fine; to read one from Windows use `wsl cat <file>`.
 
 ## Environment
 - **Build/run host: WSL2 Ubuntu** (default user `gizmoclardin`). Do not build from native Windows/PowerShell.
 - **Rust toolchain: pinned to 1.76.0** by `rust-toolchain.toml` (rustup honors it automatically inside the repo).
-- Repo path from WSL: `/mnt/d/Work/infinia/solana`.
+- Repo path from WSL: `/mnt/d/Work/infinia/solana-ml-dsa-44`.
 - Build deps (already installed): `libssl-dev libudev-dev pkg-config zlib1g-dev llvm clang cmake protobuf-compiler libprotobuf-dev` (plus gcc/make).
 
 ## ⚠️ First-build fix: restore Windows-corrupted symlinks
@@ -29,7 +29,7 @@ This repo has **26 git symlinks** (mode `120000`). A Windows checkout (`core.sym
 `error: expected item, found `..`  --> frozen-abi/macro/build.rs:1:1`.
 If you hit this (e.g. after a fresh clone on Windows), restore them from WSL:
 ```bash
-cd /mnt/d/Work/infinia/solana
+cd /mnt/d/Work/infinia/solana-ml-dsa-44
 git config core.symlinks true
 git ls-files -s | grep '^120000' | awk '{print $4}' | while read f; do ln -sfn "$(cat "$f")" "$f"; done
 ```
@@ -37,14 +37,14 @@ Already applied in this checkout. Restoring symlinks made WSL `git status` show 
 
 ## Build
 ```bash
-cd /mnt/d/Work/infinia/solana
+cd /mnt/d/Work/infinia/solana-ml-dsa-44
 cargo build --release --bin solana-test-validator --bin solana --bin solana-keygen
 ```
 Binaries land in `target/release/`. First build ≈ **20 min**; incremental builds are fast.
 
 ## Run the local test validator
 ```bash
-cd /mnt/d/Work/infinia/solana
+cd /mnt/d/Work/infinia/solana-ml-dsa-44
 export PATH="$PWD/target/release:$PATH"
 solana-test-validator --ledger ~/solana-test-ledger      # add --reset for a fresh genesis
 ```
@@ -54,7 +54,7 @@ solana-test-validator --ledger ~/solana-test-ledger      # add --reset for a fre
 
 ## Interact (second terminal)
 ```bash
-export PATH="/mnt/d/Work/infinia/solana/target/release:$PATH"
+export PATH="/mnt/d/Work/infinia/solana-ml-dsa-44/target/release:$PATH"
 solana config set --url http://127.0.0.1:8899
 solana-keygen new --no-bip39-passphrase     # once, if you have no wallet
 solana airdrop 10
