@@ -4,7 +4,8 @@ use {
     lazy_static::lazy_static,
     solana_sdk::{
         address_lookup_table, bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable,
-        compute_budget, ed25519_program, loader_v4, pubkey::Pubkey, secp256k1_program,
+        compute_budget, ed25519_program, loader_v4, ml_dsa_program, pubkey::Pubkey,
+        secp256k1_program,
     },
     std::collections::HashMap,
 };
@@ -28,6 +29,14 @@ pub const SIGNATURE_COST: u64 = COMPUTE_UNIT_TO_US_RATIO * 24;
 pub const SECP256K1_VERIFY_COST: u64 = COMPUTE_UNIT_TO_US_RATIO * 223;
 /// Number of compute units for one ed25519 signature verification.
 pub const ED25519_VERIFY_COST: u64 = COMPUTE_UNIT_TO_US_RATIO * 76;
+/// Number of compute units for one ML-DSA-44 (FIPS 204) signature verification.
+/// The stable figure is the *ratio*: ML-DSA-44 verify is ~2.3x ed25519 verify on the
+/// same host (median of repeated build-host runs: ~72 us vs ~31 us; `fips204` 0.4.6,
+/// release, Rust 1.76.0 — absolute numbers vary by machine/run). The 76 above is a
+/// cluster-averaged ed25519 figure, so we scale it by that measured same-host ratio
+/// rather than pasting a raw host number: 76 * 2.33 ~= 177 us-units.
+/// Re-derive with: cargo run --release -p solana-ml-dsa-program-tests --example bench_verify
+pub const ML_DSA_VERIFY_COST: u64 = COMPUTE_UNIT_TO_US_RATIO * 177;
 /// Number of compute units for one write lock
 pub const WRITE_LOCK_UNITS: u64 = COMPUTE_UNIT_TO_US_RATIO * 10;
 /// Number of data bytes per compute units
@@ -49,6 +58,7 @@ lazy_static! {
         // Note: These are precompile, run directly in bank during sanitizing;
         (secp256k1_program::id(), 0),
         (ed25519_program::id(), 0),
+        (ml_dsa_program::id(), 0),
     ]
     .iter()
     .cloned()

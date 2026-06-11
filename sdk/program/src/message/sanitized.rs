@@ -9,6 +9,7 @@ use {
             AccountKeys, AddressLoader, AddressLoaderError, MessageHeader,
             SanitizedVersionedMessage, VersionedMessage,
         },
+        ml_dsa_program,
         nonce::NONCED_TX_MARKER_IX_INDEX,
         program_utils::limited_deserialize,
         pubkey::Pubkey,
@@ -379,6 +380,13 @@ impl SanitizedMessage {
                             .num_ed25519_instruction_signatures
                             .saturating_add(u64::from(*num_verifies));
                 }
+            } else if ml_dsa_program::check_id(program_id) {
+                if let Some(num_verifies) = instruction.data.first() {
+                    transaction_signature_details.num_ml_dsa_instruction_signatures =
+                        transaction_signature_details
+                            .num_ml_dsa_instruction_signatures
+                            .saturating_add(u64::from(*num_verifies));
+                }
             }
         }
 
@@ -393,6 +401,7 @@ pub struct TransactionSignatureDetails {
     num_transaction_signatures: u64,
     num_secp256k1_instruction_signatures: u64,
     num_ed25519_instruction_signatures: u64,
+    num_ml_dsa_instruction_signatures: u64,
 }
 
 impl TransactionSignatureDetails {
@@ -401,6 +410,7 @@ impl TransactionSignatureDetails {
         self.num_transaction_signatures
             .saturating_add(self.num_secp256k1_instruction_signatures)
             .saturating_add(self.num_ed25519_instruction_signatures)
+            .saturating_add(self.num_ml_dsa_instruction_signatures)
     }
 
     /// return the number of transaction signatures
@@ -416,6 +426,11 @@ impl TransactionSignatureDetails {
     /// return the number of ed25519 instruction signatures
     pub fn num_ed25519_instruction_signatures(&self) -> u64 {
         self.num_ed25519_instruction_signatures
+    }
+
+    /// return the number of ML-DSA-44 instruction signatures
+    pub fn num_ml_dsa_instruction_signatures(&self) -> u64 {
+        self.num_ml_dsa_instruction_signatures
     }
 }
 
@@ -625,18 +640,20 @@ mod tests {
         let loader_instr = CompiledInstruction::new(2, &(), vec![0, 1]);
         let mock_secp256k1_instr = CompiledInstruction::new(3, &[1u8; 10], vec![]);
         let mock_ed25519_instr = CompiledInstruction::new(4, &[5u8; 10], vec![]);
+        let mock_ml_dsa_instr = CompiledInstruction::new(5, &[3u8; 10], vec![]);
 
         let message = SanitizedMessage::try_from_legacy_message(
             legacy::Message::new_with_compiled_instructions(
                 2,
                 1,
-                2,
+                3,
                 vec![
                     key0,
                     key1,
                     loader_key,
                     secp256k1_program::id(),
                     ed25519_program::id(),
+                    ml_dsa_program::id(),
                 ],
                 Hash::default(),
                 vec![
@@ -644,6 +661,7 @@ mod tests {
                     mock_secp256k1_instr.clone(),
                     mock_ed25519_instr,
                     mock_secp256k1_instr,
+                    mock_ml_dsa_instr,
                 ],
             ),
         )
@@ -656,5 +674,9 @@ mod tests {
         assert_eq!(2, signature_details.num_secp256k1_instruction_signatures);
         // expect 5 ed25519 instruction signatures from mock_ed25519_instr
         assert_eq!(5, signature_details.num_ed25519_instruction_signatures);
+        // expect 3 ML-DSA instruction signatures from mock_ml_dsa_instr
+        assert_eq!(3, signature_details.num_ml_dsa_instruction_signatures);
+        // total_signatures() (the per-signature fee basis) sums all four counts
+        assert_eq!(2 + 2 + 5 + 3, signature_details.total_signatures());
     }
 }

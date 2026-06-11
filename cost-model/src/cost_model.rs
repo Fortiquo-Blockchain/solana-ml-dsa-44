@@ -60,6 +60,8 @@ impl CostModel {
             signatures_count_detail.num_secp256k1_instruction_signatures();
         tx_cost.num_ed25519_instruction_signatures =
             signatures_count_detail.num_ed25519_instruction_signatures();
+        tx_cost.num_ml_dsa_instruction_signatures =
+            signatures_count_detail.num_ml_dsa_instruction_signatures();
         tx_cost.signature_cost = signatures_count_detail
             .num_transaction_signatures()
             .saturating_mul(SIGNATURE_COST)
@@ -72,6 +74,11 @@ impl CostModel {
                 signatures_count_detail
                     .num_ed25519_instruction_signatures()
                     .saturating_mul(ED25519_VERIFY_COST),
+            )
+            .saturating_add(
+                signatures_count_detail
+                    .num_ml_dsa_instruction_signatures()
+                    .saturating_mul(ML_DSA_VERIFY_COST),
             );
     }
 
@@ -324,6 +331,64 @@ mod tests {
         );
         assert_eq!(*expected_execution_cost, tx_cost.programs_execution_cost);
         assert_eq!(3, tx_cost.data_bytes_cost);
+    }
+
+    #[test]
+    fn test_cost_model_ml_dsa_precompile_signature() {
+        let (mint_keypair, start_hash) = test_setup();
+
+        // Precompile-style instruction: the first data byte is the verify count,
+        // mirroring how the ed25519/secp256k1 precompiles are laid out.
+        let ml_dsa_instr =
+            Instruction::new_with_bytes(solana_sdk::ml_dsa_program::id(), &[1u8, 0], vec![]);
+        let tx = SanitizedTransaction::from_transaction_for_tests(
+            Transaction::new_signed_with_payer(
+                &[ml_dsa_instr],
+                Some(&mint_keypair.pubkey()),
+                &[&mint_keypair],
+                start_hash,
+            ),
+        );
+
+        let tx_cost = CostModel::calculate_cost(&tx, &FeatureSet::all_enabled());
+        assert_eq!(1, tx_cost.num_ml_dsa_instruction_signatures());
+        // 1 fee-payer signature + 1 ML-DSA-44 precompile verification.
+        assert_eq!(
+            SIGNATURE_COST + ML_DSA_VERIFY_COST,
+            tx_cost.signature_cost()
+        );
+    }
+
+    #[test]
+    fn test_cost_model_mixed_precompile_signatures() {
+        let (mint_keypair, start_hash) = test_setup();
+
+        // Two ML-DSA precompile instructions (2 + 1 verifies) plus one ed25519
+        // precompile instruction (1 verify): exercises additive counting across
+        // instructions and the full per-type signature-cost chain.
+        let ml_dsa_a =
+            Instruction::new_with_bytes(solana_sdk::ml_dsa_program::id(), &[2u8, 0], vec![]);
+        let ml_dsa_b =
+            Instruction::new_with_bytes(solana_sdk::ml_dsa_program::id(), &[1u8, 0], vec![]);
+        let ed25519 =
+            Instruction::new_with_bytes(solana_sdk::ed25519_program::id(), &[1u8, 0], vec![]);
+        let tx = SanitizedTransaction::from_transaction_for_tests(
+            Transaction::new_signed_with_payer(
+                &[ml_dsa_a, ml_dsa_b, ed25519],
+                Some(&mint_keypair.pubkey()),
+                &[&mint_keypair],
+                start_hash,
+            ),
+        );
+
+        let tx_cost = CostModel::calculate_cost(&tx, &FeatureSet::all_enabled());
+        assert_eq!(3, tx_cost.num_ml_dsa_instruction_signatures());
+        assert_eq!(1, tx_cost.num_ed25519_instruction_signatures());
+        // 1 fee-payer signature + 3 ML-DSA verifies + 1 ed25519 verify.
+        assert_eq!(
+            SIGNATURE_COST + 3 * ML_DSA_VERIFY_COST + ED25519_VERIFY_COST,
+            tx_cost.signature_cost()
+        );
     }
 
     #[test]
