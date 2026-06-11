@@ -50,6 +50,16 @@ impl MlDsaKeypair {
         Ok(Self::from_parts(public.into_bytes(), secret.into_bytes()))
     }
 
+    /// Deterministically derive an ML-DSA-44 keypair from a 32-byte seed (the
+    /// FIPS 204 key-generation seed ξ, via `KG::keygen_from_seed`). This lets
+    /// `solana-keygen --scheme mldsa44` give the same BIP39-mnemonic recovery
+    /// story as Ed25519: the same seed always reproduces the same key.
+    pub fn from_seed(xi: &[u8; 32]) -> Self {
+        use fips204::{ml_dsa_44::KG, traits::KeyGen};
+        let (public, secret) = KG::keygen_from_seed(xi);
+        Self::from_parts(public.into_bytes(), secret.into_bytes())
+    }
+
     fn from_parts(public_bytes: [u8; PK_LEN], secret_bytes: [u8; SK_LEN]) -> Self {
         let address = ml_dsa_address(&public_bytes);
         Self {
@@ -81,6 +91,19 @@ impl MlDsaKeypair {
         secret.try_sign(message, &[]).map_err(|e| e.to_string().into())
     }
 
+    /// Verify `signature` over `message` against this keypair's public key,
+    /// using an EMPTY FIPS 204 context (matching [`Self::sign`]). Returns `false`
+    /// if the signature does not verify; the "public key failed to parse" arm is
+    /// unreachable for keypairs built via [`Self::from_bytes`]/[`Self::new`]/
+    /// [`Self::from_seed`], which all validate the public key up front.
+    pub fn verify(&self, message: &[u8], signature: &[u8; SIG_LEN]) -> bool {
+        use fips204::{ml_dsa_44::PublicKey, traits::Verifier};
+        match PublicKey::try_from_bytes(self.public_bytes) {
+            Ok(public) => public.verify(message, signature, &[]),
+            Err(_) => false,
+        }
+    }
+
     /// Serialize to the on-disk layout `[public(1312) || secret(2560)]`.
     pub fn to_bytes(&self) -> [u8; ML_DSA_KEYPAIR_FILE_BYTES] {
         let mut out = [0u8; ML_DSA_KEYPAIR_FILE_BYTES];
@@ -99,8 +122,10 @@ impl MlDsaKeypair {
         }
         let public_bytes: [u8; PK_LEN] = bytes[..PK_LEN].try_into()?;
         let secret_bytes: [u8; SK_LEN] = bytes[PK_LEN..].try_into()?;
-        // Validate the secret key parses.
+        // Validate both halves parse, so a corrupt public half can never later
+        // surface as a mere "verification failed" in [`Self::verify`].
         PrivateKey::try_from_bytes(secret_bytes).map_err(|e| e.to_string())?;
+        fips204::ml_dsa_44::PublicKey::try_from_bytes(public_bytes).map_err(|e| e.to_string())?;
         Ok(Self::from_parts(public_bytes, secret_bytes))
     }
 }
@@ -172,5 +197,22 @@ mod tests {
         let pk = PublicKey::try_from_bytes(*kp.public_key_bytes()).unwrap();
         assert!(pk.verify(msg, &sig, &[]));
         assert!(!pk.verify(b"different", &sig, &[]));
+    }
+
+    #[test]
+    fn test_from_seed_is_deterministic_and_recoverable() {
+        let xi = [7u8; 32];
+        let a = MlDsaKeypair::from_seed(&xi);
+        let b = MlDsaKeypair::from_seed(&xi);
+        // Same seed => same key/address (the recovery guarantee).
+        assert_eq!(a.address(), b.address());
+        assert_eq!(a.public_key_bytes(), b.public_key_bytes());
+        // A different seed => a different key.
+        let c = MlDsaKeypair::from_seed(&[8u8; 32]);
+        assert_ne!(a.address(), c.address());
+        // The derived key signs and self-verifies.
+        let sig = a.sign(b"recover me").unwrap();
+        assert!(a.verify(b"recover me", &sig));
+        assert!(!a.verify(b"tampered", &sig));
     }
 }
