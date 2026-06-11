@@ -14,6 +14,18 @@ use {
     test::Bencher,
 };
 
+// --- ML-DSA-44 vs ed25519 sigverify baseline (EPIC 4-2) ---
+// The benches below sign with ed25519 (`test_tx`). ML-DSA-44 packets (the 0x00
+// wire) verify on the CPU verify path (`verify_packet`, reached via
+// `ed25519_verify`) at a measured ~2.3x the per-signature cost of ed25519 verify,
+// and are 38x larger (2420 B sig vs 64 B). See the runnable, stable baseline
+// `programs/ml-dsa-tests/examples/bench_verify.rs` for the point-in-time host
+// figures. A dedicated
+// ML-DSA `#[bench]` is NOT added here: these benches are nightly-only
+// (`#![feature(test)]`), are not part of the CI bench job (ci/test-bench.sh), and
+// the available nightly cannot build the 2.0-era dep tree (ahash 0.7.6 uses the
+// removed `stdsimd` feature).
+
 const NUM: usize = 256;
 const LARGE_BATCH_PACKET_COUNT: usize = 128;
 

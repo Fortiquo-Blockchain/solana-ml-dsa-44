@@ -37,6 +37,15 @@ use {
     },
 };
 
+// --- ML-DSA-44 baseline (EPIC 4-2) ---
+// bench-tps spams an ed25519 `Transaction` workload at a live cluster to measure
+// TPS. It is left on ed25519: an ML-DSA-44 run would submit the 0x00 wire as raw
+// bytes (not a typed `Transaction`), needs a running validator, and the result is
+// dominated by the primitive costs already measured on the build host in
+// `programs/ml-dsa-tests/examples/bench_verify.rs` — ML-DSA-44 vs ed25519:
+// keygen ~10x, sign ~20x, verify ~2.3x, public key 41x (1312 B), signature 38x
+// (2420 B). Those ratios, not the harness plumbing, set the ML-DSA TPS ceiling.
+
 // The point at which transactions become "too old", in seconds.
 const MAX_TX_QUEUE_AGE: u64 = (MAX_PROCESSING_AGE as f64 * DEFAULT_S_PER_SLOT) as u64;
 

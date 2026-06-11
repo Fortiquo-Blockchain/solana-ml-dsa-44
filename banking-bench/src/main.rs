@@ -103,6 +103,14 @@ impl std::str::FromStr for WriteLockContention {
     }
 }
 
+// NOTE (EPIC 4-2): this harness feeds packets straight to BankingStage, bypassing
+// sigverify, and intentionally overwrites each transaction's signature and payer
+// with RANDOM bytes (below) — it measures banking-stage scheduling / lock
+// contention, not signing or verification. It is therefore left on ed25519: an
+// ML-DSA-44 conversion would exercise neither signing (~20x ed25519) nor verify
+// (~2.3x), only the packet-size effect (ML-DSA txs are ~3.9 KB vs ~0.3 KB), and
+// the 0x00 bridge validates sha256(pubkey)==account_key so the random-key trick
+// would not port. Crypto baseline: programs/ml-dsa-tests/examples/bench_verify.rs.
 fn make_accounts_txs(
     total_num_transactions: usize,
     packets_per_batch: usize,
