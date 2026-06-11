@@ -44,10 +44,24 @@ pub struct MlDsaKeypair {
 }
 
 impl MlDsaKeypair {
+    /// Secret-key length in bytes for FIPS 204 ML-DSA-44 (= fips204 `SK_LEN`).
+    pub const SECRET_KEY_LENGTH: usize = SK_LEN; // 2560
+    /// Public-key length in bytes for FIPS 204 ML-DSA-44 (= fips204 `PK_LEN`).
+    pub const PUBLIC_KEY_LENGTH: usize = PK_LEN; // 1312
+    /// Signature length in bytes for FIPS 204 ML-DSA-44 (= fips204 `SIG_LEN`).
+    pub const SIGNATURE_LENGTH: usize = SIG_LEN; // 2420
+
     /// Generate a fresh ML-DSA-44 keypair.
     pub fn new() -> Result<Self, Box<dyn error::Error>> {
         let (public, secret) = ml_dsa_44::try_keygen().map_err(|e| e.to_string())?;
         Ok(Self::from_parts(public.into_bytes(), secret.into_bytes()))
+    }
+
+    /// Alias for [`Self::new`], matching the `generate()` naming used by the
+    /// Ed25519 [`crate::signer::keypair::Keypair`]. fips204 `try_keygen` seeds
+    /// itself from the OS RNG, so there is no caller-provided RNG parameter.
+    pub fn generate() -> Result<Self, Box<dyn error::Error>> {
+        Self::new()
     }
 
     /// Deterministically derive an ML-DSA-44 keypair from a 32-byte seed (the
@@ -130,6 +144,15 @@ impl MlDsaKeypair {
     }
 }
 
+// Pin the FIPS 204 ML-DSA-44 sizes so a future fips204 bump can't silently shift
+// them out from under the on-disk format and the transaction wire layout.
+#[cfg(test)]
+static_assertions::const_assert_eq!(MlDsaKeypair::SECRET_KEY_LENGTH, 2560);
+#[cfg(test)]
+static_assertions::const_assert_eq!(MlDsaKeypair::PUBLIC_KEY_LENGTH, 1312);
+#[cfg(test)]
+static_assertions::const_assert_eq!(MlDsaKeypair::SIGNATURE_LENGTH, 2420);
+
 /// Read an ML-DSA-44 keypair from a JSON byte array (same on-disk shape as the
 /// Ed25519 keypair file, just 3872 bytes instead of 64).
 pub fn read_ml_dsa_keypair<R: Read>(reader: &mut R) -> Result<MlDsaKeypair, Box<dyn error::Error>> {
@@ -173,6 +196,21 @@ mod tests {
     fn test_address_is_hash_of_pubkey() {
         let kp = MlDsaKeypair::new().unwrap();
         assert_eq!(kp.address(), ml_dsa_address(kp.public_key_bytes()));
+    }
+
+    #[test]
+    fn test_generate_round_trip() {
+        // EPIC1-1 acceptance: generate() yields valid key material, the produced
+        // sizes match the named constants, and a sign + verify round-trip passes
+        // while a tampered message fails.
+        let kp = MlDsaKeypair::generate().unwrap();
+        assert_eq!(kp.public_key_bytes().len(), MlDsaKeypair::PUBLIC_KEY_LENGTH);
+
+        let msg = b"epic1-1 round trip";
+        let sig = kp.sign(msg).unwrap();
+        assert_eq!(sig.len(), MlDsaKeypair::SIGNATURE_LENGTH);
+        assert!(kp.verify(msg, &sig));
+        assert!(!kp.verify(b"tampered", &sig));
     }
 
     #[test]
