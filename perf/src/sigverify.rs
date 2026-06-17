@@ -165,9 +165,10 @@ fn verify_packet(packet: &mut Packet, reject_non_vote: bool) -> bool {
 /// address binding — lives in `solana_sdk::ml_dsa_transaction` so there is a single
 /// implementation shared by the client, sigverify, and RPC preflight.
 ///
-/// NOTE: ML-DSA packets are only handled on this CPU path. The GPU path
-/// (`ed25519_verify`) is dormant unless perf-libs is loaded; if it is ever enabled,
-/// `0x00`-marked packets must be filtered to CPU before GPU offset generation.
+/// NOTE: ML-DSA packets are only verified on this CPU path. The CUDA kernel in
+/// `ed25519_verify` cannot parse their layout, so when perf-libs is loaded that
+/// function routes any batch set containing a `0x00`-marked packet back to
+/// `ed25519_verify_cpu` (logging a one-time warning) instead of dropping them.
 #[must_use]
 fn verify_ml_dsa_packet(packet: &Packet) -> bool {
     let Some(data) = packet.data(..) else {
@@ -625,6 +626,30 @@ pub fn mark_disabled(batches: &mut [PacketBatch], r: &[Vec<u8>]) {
     }
 }
 
+/// True if any non-discarded packet is an ML-DSA-44 transaction (tagged by the
+/// `0x00` lead byte). Used to keep post-quantum packets off the CUDA kernel,
+/// which only understands the fixed Ed25519 packet layout.
+fn batches_contain_ml_dsa(batches: &[PacketBatch]) -> bool {
+    batches.iter().any(|batch| {
+        batch.iter().any(|packet| {
+            !packet.meta().discard()
+                && packet.data(0) == Some(&solana_sdk::ml_dsa_transaction::ML_DSA_TX_MARKER)
+        })
+    })
+}
+
+/// Emit the "GPU cannot verify ML-DSA" warning at most once per process, so a
+/// steady stream of post-quantum packets does not flood the log.
+fn warn_ml_dsa_gpu_fallback_once() {
+    static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+    WARN_ONCE.call_once(|| {
+        warn!(
+            "GPU sigverify (perf-libs/CUDA) does not support ML-DSA-44; falling back to CPU \
+             verification for batch sets containing 0x00-marked post-quantum packets"
+        );
+    });
+}
+
 pub fn ed25519_verify(
     batches: &mut [PacketBatch],
     recycler: &Recycler<TxOffset>,
@@ -635,6 +660,21 @@ pub fn ed25519_verify(
     let Some(api) = perf_libs::api() else {
         return ed25519_verify_cpu(batches, reject_non_vote, valid_packet_count);
     };
+
+    // Post-quantum ML-DSA-44 packets (0x00 marker) carry a 2420-byte signature and
+    // 1312-byte key — a layout the CUDA ed25519 kernel cannot parse: its fixed
+    // 64-byte offset math mis-parses them and forces sigverify to fail, a silent
+    // drop. Until the kernel learns ML-DSA, route any batch set containing one to
+    // the CPU verifier (which handles both schemes) so post-quantum packets are
+    // verified rather than dropped.
+    if batches_contain_ml_dsa(batches) {
+        warn_ml_dsa_gpu_fallback_once();
+        // A counter (not just the one-time warn) keeps the sustained GPU->CPU
+        // throughput hit visible in metrics, like the sibling ed25519_verify_*
+        // counters below.
+        inc_new_counter_debug!("sigverify_ml_dsa_gpu_fallback", valid_packet_count);
+        return ed25519_verify_cpu(batches, reject_non_vote, valid_packet_count);
+    }
     let total_packet_count = count_packets_in_batches(batches);
     // micro-benchmarks show GPU time for smallest batch around 15-20ms
     // and CPU speed for 64-128 sigverifies around 10-20ms. 64 is a nice
@@ -912,6 +952,60 @@ mod tests {
         // Regression: a normal Ed25519 transfer still verifies.
         let mut packet = Packet::from_data(None, test_tx()).unwrap();
         assert!(verify_packet(&mut packet, false));
+    }
+
+    #[test]
+    fn test_batches_contain_ml_dsa() {
+        use solana_sdk::{
+            ml_dsa_keypair::MlDsaKeypair, ml_dsa_transaction::MlDsaTransaction, system_instruction,
+        };
+
+        // Build a real ML-DSA (0x00-marked) packet from raw wire bytes.
+        let payer = MlDsaKeypair::new().unwrap();
+        let message = Message::new(
+            &[system_instruction::transfer(
+                &payer.address(),
+                &Pubkey::new_unique(),
+                1_000,
+            )],
+            Some(&payer.address()),
+        );
+        let data = MlDsaTransaction::sign(message, &[&payer])
+            .unwrap()
+            .serialize();
+        let mut ml_dsa = Packet::from_data(None, 0u8).unwrap();
+        ml_dsa.buffer_mut()[..data.len()].copy_from_slice(&data);
+        ml_dsa.meta_mut().size = data.len();
+
+        let ed25519 = Packet::from_data(None, test_tx()).unwrap();
+        let as_batch = |p: &Packet| {
+            let mut b = PacketBatch::with_capacity(1);
+            b.push(p.clone());
+            b
+        };
+
+        // Empty input and an Ed25519-only batch are not flagged.
+        assert!(!batches_contain_ml_dsa(&[]));
+        assert!(!batches_contain_ml_dsa(std::slice::from_ref(&as_batch(&ed25519))));
+
+        // A batch that also contains the ML-DSA packet is flagged...
+        let mut mixed = PacketBatch::with_capacity(2);
+        mixed.push(ed25519.clone());
+        mixed.push(ml_dsa.clone());
+        assert!(batches_contain_ml_dsa(std::slice::from_ref(&mixed)));
+
+        // ...including when the marker is in a later batch (pins the outer iteration).
+        let two_batches = [as_batch(&ed25519), as_batch(&ml_dsa)];
+        assert!(batches_contain_ml_dsa(&two_batches));
+
+        // A discarded ML-DSA packet is ignored, even alongside live Ed25519 traffic
+        // (it never reaches the GPU kernel, so it must not force a fallback).
+        let mut discarded_ml_dsa = ml_dsa.clone();
+        discarded_ml_dsa.meta_mut().set_discard(true);
+        let mut discarded_plus_live = PacketBatch::with_capacity(2);
+        discarded_plus_live.push(discarded_ml_dsa);
+        discarded_plus_live.push(ed25519.clone());
+        assert!(!batches_contain_ml_dsa(std::slice::from_ref(&discarded_plus_live)));
     }
 
     #[test]
