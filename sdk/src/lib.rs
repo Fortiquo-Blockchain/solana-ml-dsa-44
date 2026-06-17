@@ -83,6 +83,7 @@ pub mod inner_instruction;
 pub mod log;
 pub mod ml_dsa_instruction;
 pub mod ml_dsa_keypair;
+pub mod ml_dsa_public_key;
 pub mod ml_dsa_signature;
 pub mod ml_dsa_transaction;
 pub mod native_loader;
