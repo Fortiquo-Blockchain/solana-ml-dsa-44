@@ -86,6 +86,24 @@ impl fmt::Display for CrdsSignature {
     }
 }
 
+impl CrdsSignature {
+    /// Verify this signature over `message`, for a value owned by `identity` (its
+    /// 32-byte gossip pubkey). For the post-quantum variant this also enforces the
+    /// binding `sha256(carried public key) == identity`, so a forged 1312-byte key
+    /// cannot impersonate `identity` — the same binding Phase 1 uses for
+    /// transactions. Keeping the binding here, beside the signature, means an
+    /// ML-DSA signature can never be verified without an identity to bind against.
+    pub fn verify(&self, identity: &Pubkey, message: &[u8]) -> bool {
+        match self {
+            CrdsSignature::Ed25519(sig) => sig.verify(identity.as_ref(), message),
+            CrdsSignature::MlDsa { pubkey, signature } => {
+                ml_dsa_address(pubkey.as_bytes()) == *identity
+                    && pubkey.verify(message, signature.as_bytes())
+            }
+        }
+    }
+}
+
 /// CrdsValue that is replicated across the cluster
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, AbiExample)]
 pub struct CrdsValue {
@@ -127,17 +145,8 @@ impl Signable for CrdsValue {
     }
 
     fn verify(&self) -> bool {
-        match &self.signature {
-            CrdsSignature::Ed25519(sig) => {
-                sig.verify(self.pubkey().as_ref(), self.signable_data().borrow())
-            }
-            // ML-DSA: the signature is valid AND the carried public key hashes to
-            // this value's 32-byte identity (so a forged key can't impersonate it).
-            CrdsSignature::MlDsa { pubkey, signature } => {
-                ml_dsa_address(pubkey.as_bytes()) == self.pubkey()
-                    && pubkey.verify(self.signable_data().borrow(), signature.as_bytes())
-            }
-        }
+        self.signature
+            .verify(&self.pubkey(), self.signable_data().borrow())
     }
 }
 
@@ -645,20 +654,34 @@ impl CrdsValue {
     }
 
     /// Sign `data` with an ML-DSA-44 (post-quantum) keypair, for Phase 2b gossip.
-    /// The keypair's address (`sha256(public_key)`) must equal `data`'s 32-byte
-    /// identity pubkey, or the value will fail [`Signable::verify`]'s binding
-    /// check. The 1312-byte public key is carried in the value so any peer can
-    /// verify it without a side channel (mirrors Phase 1 transactions).
-    pub fn new_signed_ml_dsa(data: CrdsData, keypair: &MlDsaKeypair) -> Self {
+    /// The 1312-byte public key is carried in the value so any peer can verify it
+    /// without a side channel (mirrors Phase 1 transactions).
+    ///
+    /// Fails if signing errors, or if the keypair's address (`sha256(public_key)`)
+    /// does not equal `data`'s 32-byte identity — such a value could never verify
+    /// on any peer, so it is rejected here at the producer instead of being signed
+    /// and then silently dropped cluster-wide. Returning a `Result` also keeps this
+    /// off the panic path for the live signing path (a transient signing error
+    /// should skip one value, not crash the gossip thread).
+    pub fn new_signed_ml_dsa(
+        data: CrdsData,
+        keypair: &MlDsaKeypair,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut value = Self::new_unsigned(data);
-        let signature = keypair
-            .sign(value.signable_data().borrow())
-            .expect("ML-DSA signing failed");
+        if keypair.address() != value.pubkey() {
+            return Err(format!(
+                "ML-DSA keypair address {} does not match the CrdsData identity {}",
+                keypair.address(),
+                value.pubkey(),
+            )
+            .into());
+        }
+        let signature = keypair.sign(value.signable_data().borrow())?;
         value.signature = CrdsSignature::MlDsa {
             pubkey: Box::new(MlDsaPublicKey::from(*keypair.public_key_bytes())),
             signature: Box::new(MlDsaSignature::from(signature)),
         };
-        value
+        Ok(value)
     }
 
     /// New random CrdsValue for tests and benchmarks.

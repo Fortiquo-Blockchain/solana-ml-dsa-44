@@ -16,6 +16,8 @@ use {
     solana_sdk::{
         hash::Hash,
         ml_dsa_keypair::MlDsaKeypair,
+        ml_dsa_public_key::MlDsaPublicKey,
+        ml_dsa_signature::MlDsaSignature,
         pubkey::Pubkey,
         signature::{Keypair, Signable, Signer},
         timing::timestamp,
@@ -473,9 +475,9 @@ fn two_node_gossip_crds_propagation() {
     gossip_b.join().unwrap();
 }
 
-/// Phase 2b core — a CRDS value signed with an ML-DSA-44 identity verifies, the
-/// `sha256(public_key) == identity` binding rejects a mismatched key, and the value
-/// survives the bincode wire round-trip gossip uses. (Live 2-node propagation of
+/// Phase 2b core — a CRDS value signed with an ML-DSA-44 identity verifies and
+/// survives the bincode wire round-trip gossip uses, and a key that doesn't match
+/// the identity is rejected at construction. (Live 2-node propagation of
 /// ML-DSA-signed values follows once the ClusterInfo identity plumbing lands.)
 #[test]
 fn ml_dsa_signed_crds_value_verifies_and_round_trips() {
@@ -483,19 +485,80 @@ fn ml_dsa_signed_crds_value_verifies_and_round_trips() {
     let data =
         CrdsData::LegacyContactInfo(ContactInfo::new_localhost(&mldsa.address(), timestamp()));
 
-    let value = CrdsValue::new_signed_ml_dsa(data.clone(), &mldsa);
+    let value = CrdsValue::new_signed_ml_dsa(data.clone(), &mldsa).unwrap();
     assert!(matches!(value.signature, CrdsSignature::MlDsa { .. }));
     assert!(value.verify(), "ML-DSA-signed CRDS value must verify");
-
-    // Same identity in the data, but signed (and pubkey carried) by a DIFFERENT
-    // key: the signature is valid yet sha256(pubkey) != identity, so it's rejected.
-    let wrong = MlDsaKeypair::new().unwrap();
-    let unbound = CrdsValue::new_signed_ml_dsa(data, &wrong);
-    assert!(!unbound.verify(), "a pubkey not hashing to the identity must be rejected");
 
     // Wire round-trip (gossip serializes CrdsValue with bincode).
     let bytes = bincode::serialize(&value).unwrap();
     let restored: CrdsValue = bincode::deserialize(&bytes).unwrap();
     assert_eq!(restored, value);
     assert!(restored.verify(), "value must still verify after a bincode round-trip");
+
+    // A keypair whose address != the data identity can't produce a verifiable
+    // value, so construction is rejected at the producer rather than silently
+    // dropped cluster-wide.
+    let wrong = MlDsaKeypair::new().unwrap();
+    assert!(
+        CrdsValue::new_signed_ml_dsa(data, &wrong).is_err(),
+        "signing with a key that doesn't match the identity must error"
+    );
+}
+
+/// Phase 2b — `verify` must reject every way an ML-DSA value can be forged: a
+/// corrupted signature (the crypto clause), mutated data after signing, and a
+/// carried key that doesn't hash to the identity (the binding clause). Together
+/// these exercise BOTH halves of the `&&` in the verify binding.
+#[test]
+fn ml_dsa_crds_value_rejects_tampering() {
+    let mldsa = MlDsaKeypair::new().unwrap();
+    let data =
+        CrdsData::LegacyContactInfo(ContactInfo::new_localhost(&mldsa.address(), timestamp()));
+
+    // (a) corrupted signature -> fails the crypto clause (binding still holds).
+    let mut bad_sig = CrdsValue::new_signed_ml_dsa(data.clone(), &mldsa).unwrap();
+    if let CrdsSignature::MlDsa { signature, .. } = &mut bad_sig.signature {
+        let mut raw = signature.to_bytes();
+        raw[0] ^= 0xFF;
+        *signature = Box::new(MlDsaSignature::from(raw));
+    }
+    assert!(!bad_sig.verify(), "a corrupted ML-DSA signature must be rejected");
+
+    // (b) mutated data -> the signature no longer matches the signed bytes.
+    let mut bad_data = CrdsValue::new_signed_ml_dsa(data.clone(), &mldsa).unwrap();
+    bad_data.data = CrdsData::LegacyContactInfo(ContactInfo::new_localhost(
+        &mldsa.address(),
+        timestamp() + 1,
+    ));
+    assert!(!bad_data.verify(), "an ML-DSA value with mutated data must be rejected");
+
+    // (c) all-zero carried key+sig over a real identity -> fails the binding
+    //     (sha256([0;1312]) != identity) and the crypto clause.
+    let garbage = CrdsValue {
+        signature: CrdsSignature::MlDsa {
+            pubkey: Box::new(MlDsaPublicKey::from([0u8; 1312])),
+            signature: Box::new(MlDsaSignature::from([0u8; 2420])),
+        },
+        data,
+    };
+    assert!(!garbage.verify(), "an all-zero ML-DSA pubkey+signature must be rejected");
+}
+
+/// Phase 2b — the Ed25519 path is unchanged under the new `CrdsSignature` enum: a
+/// classic value reports the `Ed25519` variant, verifies, and round-trips on the
+/// wire (the enum adds a 1-byte discriminant).
+#[test]
+fn ed25519_crds_value_round_trips_under_enum() {
+    let ed = Keypair::new();
+    let value = CrdsValue::new_signed(
+        CrdsData::LegacyContactInfo(ContactInfo::new_localhost(&ed.pubkey(), timestamp())),
+        &ed,
+    );
+    assert!(matches!(value.signature, CrdsSignature::Ed25519(_)));
+    assert!(value.verify(), "Ed25519 value must verify");
+
+    let restored: CrdsValue =
+        bincode::deserialize(&bincode::serialize(&value).unwrap()).unwrap();
+    assert_eq!(restored, value);
+    assert!(restored.verify(), "Ed25519 value must verify after a wire round-trip");
 }
