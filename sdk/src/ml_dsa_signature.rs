@@ -80,6 +80,16 @@ impl AsRef<[u8]> for MlDsaSignature {
 // indices or bounds to range-check, so the default no-op impl is correct.
 impl crate::sanitize::Sanitize for MlDsaSignature {}
 
+// `[u8; 2420]` is too large to derive AbiExample, so provide it manually (gated
+// on specialization like the other hand-written impls, e.g. `Meta`/`FeeStructure`).
+// Needed so this type can be embedded in gossip's frozen-abi `CrdsValue`.
+#[cfg(RUSTC_WITH_SPECIALIZATION)]
+impl ::solana_frozen_abi::abi_example::AbiExample for MlDsaSignature {
+    fn example() -> Self {
+        Self([0u8; ML_DSA_SIGNATURE_BYTES])
+    }
+}
+
 impl fmt::Debug for MlDsaSignature {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", bs58::encode(self.as_ref()).into_string())

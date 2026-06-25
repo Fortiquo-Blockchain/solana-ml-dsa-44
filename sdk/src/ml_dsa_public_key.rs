@@ -114,6 +114,16 @@ impl AsRef<[u8]> for MlDsaPublicKey {
 // indices or bounds to range-check, so the default no-op impl is correct.
 impl crate::sanitize::Sanitize for MlDsaPublicKey {}
 
+// `[u8; 1312]` is too large to derive AbiExample, so provide it manually (gated
+// on specialization like the other hand-written impls, e.g. `Meta`/`FeeStructure`).
+// Needed so this type can be embedded in gossip's frozen-abi `CrdsValue`.
+#[cfg(RUSTC_WITH_SPECIALIZATION)]
+impl ::solana_frozen_abi::abi_example::AbiExample for MlDsaPublicKey {
+    fn example() -> Self {
+        Self([0u8; ML_DSA_PUBLIC_KEY_BYTES])
+    }
+}
+
 impl fmt::Debug for MlDsaPublicKey {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", bs58::encode(self.as_ref()).into_string())

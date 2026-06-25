@@ -29,7 +29,7 @@ use {
         crds_entry::CrdsEntry,
         crds_gossip_pull::CrdsTimeouts,
         crds_shards::CrdsShards,
-        crds_value::{CrdsData, CrdsValue, CrdsValueLabel},
+        crds_value::{CrdsData, CrdsSignature, CrdsValue, CrdsValueLabel},
         legacy_contact_info::LegacyContactInfo as ContactInfo,
     },
     assert_matches::debug_assert_matches,
@@ -44,7 +44,6 @@ use {
         clock::Slot,
         hash::{hash, Hash},
         pubkey::Pubkey,
-        signature::Signature,
     },
     std::{
         cmp::Ordering,
@@ -766,8 +765,12 @@ impl CrdsStats {
 
 /// check if first SIGNATURE_SAMPLE_LEADING_ZEROS bits of signature are 0
 #[inline]
-fn should_report_message_signature(signature: &Signature) -> bool {
-    let Some(Ok(bytes)) = signature.as_ref().get(..8).map(<[u8; 8]>::try_from) else {
+fn should_report_message_signature(signature: &CrdsSignature) -> bool {
+    let bytes: &[u8] = match signature {
+        CrdsSignature::Ed25519(sig) => sig.as_ref(),
+        CrdsSignature::MlDsa { signature, .. } => &signature.as_bytes()[..],
+    };
+    let Some(Ok(bytes)) = bytes.get(..8).map(<[u8; 8]>::try_from) else {
         return false;
     };
     u64::from_le_bytes(bytes).trailing_zeros() >= SIGNATURE_SAMPLE_LEADING_ZEROS

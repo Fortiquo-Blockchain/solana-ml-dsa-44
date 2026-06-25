@@ -14,6 +14,9 @@ use {
     solana_sdk::{
         clock::Slot,
         hash::Hash,
+        ml_dsa_keypair::{ml_dsa_address, MlDsaKeypair},
+        ml_dsa_public_key::MlDsaPublicKey,
+        ml_dsa_signature::MlDsaSignature,
         pubkey::{self, Pubkey},
         sanitize::{Sanitize, SanitizeError},
         signature::{Keypair, Signable, Signature, Signer},
@@ -40,10 +43,53 @@ pub const MAX_VOTES: VoteIndex = 32;
 pub type EpochSlotsIndex = u8;
 pub const MAX_EPOCH_SLOTS: EpochSlotsIndex = 255;
 
+/// The signature carried on a [`CrdsValue`]. Either the classic 64-byte Ed25519
+/// signature, or a post-quantum ML-DSA-44 signature (Phase 2b). CRDS values are
+/// keyed by a 32-byte identity, but an ML-DSA public key is 1312 bytes, so the
+/// ML-DSA variant carries the public key with it and verification reconstructs the
+/// identity as `sha256(public_key)` — the same binding Phase 1 uses for
+/// transactions (see [`ml_dsa_address`]). Boxed so the enum stays pointer-sized
+/// rather than inlining ~3.7 KB into every `CrdsValue`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, AbiExample, AbiEnumVisitor)]
+pub enum CrdsSignature {
+    Ed25519(Signature),
+    MlDsa {
+        pubkey: Box<MlDsaPublicKey>,
+        signature: Box<MlDsaSignature>,
+    },
+}
+
+impl Default for CrdsSignature {
+    fn default() -> Self {
+        CrdsSignature::Ed25519(Signature::default())
+    }
+}
+
+impl Sanitize for CrdsSignature {
+    fn sanitize(&self) -> Result<(), SanitizeError> {
+        match self {
+            CrdsSignature::Ed25519(sig) => sig.sanitize(),
+            CrdsSignature::MlDsa { pubkey, signature } => {
+                pubkey.sanitize()?;
+                signature.sanitize()
+            }
+        }
+    }
+}
+
+impl fmt::Display for CrdsSignature {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            CrdsSignature::Ed25519(sig) => write!(f, "{sig}"),
+            CrdsSignature::MlDsa { signature, .. } => write!(f, "{signature}"),
+        }
+    }
+}
+
 /// CrdsValue that is replicated across the cluster
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, AbiExample)]
 pub struct CrdsValue {
-    pub signature: Signature,
+    pub signature: CrdsSignature,
     pub data: CrdsData,
 }
 
@@ -63,17 +109,35 @@ impl Signable for CrdsValue {
         Cow::Owned(serialize(&self.data).expect("failed to serialize CrdsData"))
     }
 
+    // Only meaningful for the Ed25519 path; an ML-DSA value is never reduced to a
+    // 64-byte `Signature` (callers needing the raw signature match on
+    // `self.signature`). `set_signature` is used by the default `Signable::sign`,
+    // which only ever produces Ed25519 signatures; the ML-DSA path goes through
+    // `CrdsValue::new_signed_ml_dsa`. `verify` is overridden below to be
+    // enum-aware.
     fn get_signature(&self) -> Signature {
-        self.signature
+        match &self.signature {
+            CrdsSignature::Ed25519(sig) => *sig,
+            CrdsSignature::MlDsa { .. } => Signature::default(),
+        }
     }
 
     fn set_signature(&mut self, signature: Signature) {
-        self.signature = signature
+        self.signature = CrdsSignature::Ed25519(signature);
     }
 
     fn verify(&self) -> bool {
-        self.get_signature()
-            .verify(self.pubkey().as_ref(), self.signable_data().borrow())
+        match &self.signature {
+            CrdsSignature::Ed25519(sig) => {
+                sig.verify(self.pubkey().as_ref(), self.signable_data().borrow())
+            }
+            // ML-DSA: the signature is valid AND the carried public key hashes to
+            // this value's 32-byte identity (so a forged key can't impersonate it).
+            CrdsSignature::MlDsa { pubkey, signature } => {
+                ml_dsa_address(pubkey.as_bytes()) == self.pubkey()
+                    && pubkey.verify(self.signable_data().borrow(), signature.as_bytes())
+            }
+        }
     }
 }
 
@@ -569,7 +633,7 @@ impl CrdsValueLabel {
 impl CrdsValue {
     pub fn new_unsigned(data: CrdsData) -> Self {
         Self {
-            signature: Signature::default(),
+            signature: CrdsSignature::default(),
             data,
         }
     }
@@ -577,6 +641,23 @@ impl CrdsValue {
     pub fn new_signed(data: CrdsData, keypair: &Keypair) -> Self {
         let mut value = Self::new_unsigned(data);
         value.sign(keypair);
+        value
+    }
+
+    /// Sign `data` with an ML-DSA-44 (post-quantum) keypair, for Phase 2b gossip.
+    /// The keypair's address (`sha256(public_key)`) must equal `data`'s 32-byte
+    /// identity pubkey, or the value will fail [`Signable::verify`]'s binding
+    /// check. The 1312-byte public key is carried in the value so any peer can
+    /// verify it without a side channel (mirrors Phase 1 transactions).
+    pub fn new_signed_ml_dsa(data: CrdsData, keypair: &MlDsaKeypair) -> Self {
+        let mut value = Self::new_unsigned(data);
+        let signature = keypair
+            .sign(value.signable_data().borrow())
+            .expect("ML-DSA signing failed");
+        value.signature = CrdsSignature::MlDsa {
+            pubkey: Box::new(MlDsaPublicKey::from(*keypair.public_key_bytes())),
+            signature: Box::new(MlDsaSignature::from(signature)),
+        };
         value
     }
 

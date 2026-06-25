@@ -8,14 +8,16 @@ use {
         cluster_info::{ClusterInfo, Node},
         contact_info::{LegacyContactInfo as ContactInfo, Protocol},
         crds::Cursor,
+        crds_value::{CrdsData, CrdsSignature, CrdsValue},
         gossip_service::GossipService,
     },
     solana_perf::packet::Packet,
     solana_runtime::bank_forks::BankForks,
     solana_sdk::{
         hash::Hash,
+        ml_dsa_keypair::MlDsaKeypair,
         pubkey::Pubkey,
-        signature::{Keypair, Signer},
+        signature::{Keypair, Signable, Signer},
         timing::timestamp,
         transaction::Transaction,
     },
@@ -469,4 +471,31 @@ fn two_node_gossip_crds_propagation() {
     exit.store(true, Ordering::Relaxed);
     gossip_a.join().unwrap();
     gossip_b.join().unwrap();
+}
+
+/// Phase 2b core — a CRDS value signed with an ML-DSA-44 identity verifies, the
+/// `sha256(public_key) == identity` binding rejects a mismatched key, and the value
+/// survives the bincode wire round-trip gossip uses. (Live 2-node propagation of
+/// ML-DSA-signed values follows once the ClusterInfo identity plumbing lands.)
+#[test]
+fn ml_dsa_signed_crds_value_verifies_and_round_trips() {
+    let mldsa = MlDsaKeypair::new().unwrap();
+    let data =
+        CrdsData::LegacyContactInfo(ContactInfo::new_localhost(&mldsa.address(), timestamp()));
+
+    let value = CrdsValue::new_signed_ml_dsa(data.clone(), &mldsa);
+    assert!(matches!(value.signature, CrdsSignature::MlDsa { .. }));
+    assert!(value.verify(), "ML-DSA-signed CRDS value must verify");
+
+    // Same identity in the data, but signed (and pubkey carried) by a DIFFERENT
+    // key: the signature is valid yet sha256(pubkey) != identity, so it's rejected.
+    let wrong = MlDsaKeypair::new().unwrap();
+    let unbound = CrdsValue::new_signed_ml_dsa(data, &wrong);
+    assert!(!unbound.verify(), "a pubkey not hashing to the identity must be rejected");
+
+    // Wire round-trip (gossip serializes CrdsValue with bincode).
+    let bytes = bincode::serialize(&value).unwrap();
+    let restored: CrdsValue = bincode::deserialize(&bytes).unwrap();
+    assert_eq!(restored, value);
+    assert!(restored.verify(), "value must still verify after a bincode round-trip");
 }
