@@ -562,3 +562,53 @@ fn ed25519_crds_value_round_trips_under_enum() {
     assert_eq!(restored, value);
     assert!(restored.verify(), "Ed25519 value must verify after a wire round-trip");
 }
+
+/// Phase 2b (live) — an ML-DSA-signed CRDS value gossiped by node A propagates to
+/// node B over the real wire and is accepted only because B's sigverify pass
+/// validated the post-quantum signature. A relays a value whose identity is an
+/// ML-DSA address distinct from either node's Ed25519 identity, exercising exactly
+/// the wire + verify path Phase 2b introduces. (A node signing its OWN gossip
+/// identity with ML-DSA is deferred — that needs node identity == ML-DSA address,
+/// which is entangled with shred signing / Phase 3.)
+#[test]
+fn ml_dsa_crds_value_propagates_between_live_nodes() {
+    solana_logger::setup();
+    let exit = Arc::new(AtomicBool::new(false));
+    let (node_a, gossip_a, _tvu_a) = test_node(exit.clone());
+    let (node_b, gossip_b, _tvu_b) = test_node(exit.clone());
+
+    // Connect both directions so A's push active set can target B.
+    node_b.insert_info(node_a.my_contact_info());
+    node_a.insert_info(node_b.my_contact_info());
+
+    // Build an ML-DSA-signed CRDS value for a post-quantum identity and have A
+    // gossip it. Its identity is the ML-DSA address — neither node's Ed25519 id.
+    let mldsa = MlDsaKeypair::new().unwrap();
+    let pq_id = mldsa.address();
+    let value = CrdsValue::new_signed_ml_dsa(
+        CrdsData::LegacyContactInfo(ContactInfo::new_localhost(&pq_id, timestamp())),
+        &mldsa,
+    )
+    .unwrap();
+    assert!(value.verify(), "the value must verify before we gossip it");
+    node_a.push_signed_crds_value(value);
+
+    // B must end up holding the value — it only lands in B's table if B's verify
+    // pass accepted the ML-DSA signature and the sha256(pubkey)==identity binding.
+    let mut propagated = false;
+    for _ in 0..60 {
+        if node_b.lookup_contact_info(&pq_id, |_| ()).is_some() {
+            propagated = true;
+            break;
+        }
+        sleep(Duration::from_secs(1));
+    }
+    assert!(
+        propagated,
+        "an ML-DSA-signed CRDS value must propagate to and verify on the peer"
+    );
+
+    exit.store(true, Ordering::Relaxed);
+    gossip_a.join().unwrap();
+    gossip_b.join().unwrap();
+}

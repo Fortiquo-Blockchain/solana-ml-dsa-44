@@ -1012,6 +1012,26 @@ impl ClusterInfo {
             .push(message);
     }
 
+    /// Gossip a `CrdsValue` that was signed elsewhere — e.g. by an ML-DSA-44
+    /// post-quantum identity via [`CrdsValue::new_signed_ml_dsa`] — queuing it for
+    /// push to peers exactly like the node's own values. Phase 2b: lets a node
+    /// relay a post-quantum-signed CRDS value across real gossip without changing
+    /// the node's own (Ed25519) identity.
+    ///
+    /// Rejects (and logs) an unverifiable value: it would otherwise be queued and
+    /// then silently dropped by every peer's sigverify, wasting bandwidth with no
+    /// signal at the producer.
+    pub fn push_signed_crds_value(&self, value: CrdsValue) {
+        if !value.verify() {
+            error!(
+                "refusing to gossip unverifiable CrdsValue {:?}; peers would drop it",
+                value.label()
+            );
+            return;
+        }
+        self.push_message(value);
+    }
+
     pub fn push_snapshot_hashes(
         &self,
         full: (Slot, Hash),
