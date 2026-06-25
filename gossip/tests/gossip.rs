@@ -420,3 +420,53 @@ pub fn cluster_info_scale() {
         node.1.join().unwrap();
     }
 }
+
+/// Phase 2b foundation — a reproducible two-node gossip harness.
+///
+/// Two in-process gossip nodes must each end up holding the *other's* signed
+/// `ContactInfo` CRDS value. Node B is seeded with A's address; A then learns B
+/// purely over gossip, which means B's signed `ContactInfo` propagated to A and A
+/// verified its signature on insert. `ContactInfo` is the node-identity CRDS value
+/// gossip is built on — today Ed25519-signed via the `Signable` trait in
+/// `gossip/src/crds_value.rs` — and Phase 2b will re-sign it with ML-DSA-44. This is
+/// the testbed a future test extends to assert the propagated value's signature is
+/// post-quantum. Non-`#[ignore]` so it runs in CI: `cargo test -p solana-gossip
+/// --test gossip two_node_gossip_crds_propagation`.
+///
+/// (CRDS *votes* are intentionally not exercised here: a vote rides the
+/// stake-weighted push path, which is degenerate between exactly two nodes — see the
+/// many-node `cluster_info_scale`. Vote-CRDS signing gets its own multi-node test
+/// when Phase 2b lands.)
+#[test]
+fn two_node_gossip_crds_propagation() {
+    solana_logger::setup();
+    let exit = Arc::new(AtomicBool::new(false));
+    let (node_a, gossip_a, _tvu_a) = test_node(exit.clone());
+    let (node_b, gossip_b, _tvu_b) = test_node(exit.clone());
+    let (a_id, b_id) = (node_a.id(), node_b.id());
+
+    // Seed B with A (the entrypoint). A must then learn B purely over gossip.
+    node_b.insert_info(node_a.my_contact_info());
+
+    // Converge: each node holds the other's gossip-propagated, signature-verified
+    // ContactInfo. A holding B's is the real proof — A was never told about B except
+    // through gossip.
+    let mut converged = false;
+    for _ in 0..60 {
+        let a_has_b = node_a.lookup_contact_info(&b_id, |_| ()).is_some();
+        let b_has_a = node_b.lookup_contact_info(&a_id, |_| ()).is_some();
+        if a_has_b && b_has_a {
+            converged = true;
+            break;
+        }
+        sleep(Duration::from_secs(1));
+    }
+    assert!(
+        converged,
+        "both nodes must hold the peer's gossip-propagated, signed ContactInfo"
+    );
+
+    exit.store(true, Ordering::Relaxed);
+    gossip_a.join().unwrap();
+    gossip_b.join().unwrap();
+}
