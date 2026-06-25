@@ -127,6 +127,23 @@ bash programs/ml-dsa-tests/demo-vote.sh                       # live: PQ vote au
 ```
 Verified live: with `--ml-dsa-vote`, the vote account's authorized voter is the post-quantum address and processed/confirmed/finalized slots + the vote account's `lastVote`/root all advance (the chain roots on ML-DSA votes); without the flag, Ed25519 voting is unchanged.
 
+## Post-quantum node-to-node gossip (Phase 2b core) — done & verified
+Building on the SDK ML-DSA types, **gossip CRDS values can now carry a post-quantum ML-DSA-44 signature** — the node-to-node chatter surface (the fourth signing surface touched). The core wire/crypto change and a live cross-node verification are done; making a node sign its *own* gossip identity with ML-DSA is **deferred to Phase 3** (it needs the node identity to equal the ML-DSA address, which is entangled with shred signing). **Coexists**: Ed25519 is the default and byte-for-byte unchanged, so the node never stalls.
+
+- **Signature enum** (`gossip/src/crds_value.rs`): `CrdsValue.signature` changed from the fixed 64-byte `Signature` to a `CrdsSignature` enum — `Ed25519(Signature)` or `MlDsa { pubkey: Box<MlDsaPublicKey>, signature: Box<MlDsaSignature> }`. The ML-DSA variant carries the 1312-byte public key so any peer verifies with no side channel (mirrors the Phase 1 transaction wire format). Boxed so `CrdsValue` stays pointer-sized.
+- **Verification** (`CrdsSignature::verify(identity, message)`): the ML-DSA arm enforces the signature **and** `ml_dsa_address(pubkey) == identity` (i.e. `sha256(public_key)` equals the value's 32-byte CRDS identity), so a forged key can't impersonate an identity — the same binding as Phase 1. `CrdsValue`'s `Signable::verify` delegates to it; the shared `Signable` trait and `Ping`/`Pong`/`PruneData` (still Ed25519) are untouched.
+- **Signing** (`CrdsValue::new_signed_ml_dsa(data, &MlDsaKeypair)`): fallible — errors if signing fails or the keypair's address ≠ the data identity, so a misconfigured value is rejected at the producer rather than silently dropped cluster-wide. Ed25519 `new_signed`/`new_unsigned` are unchanged (`new_unsigned` defaults to `CrdsSignature::Ed25519`).
+- **Live relay** (`ClusterInfo::push_signed_crds_value`): lets a node gossip a pre-signed (e.g. ML-DSA) CRDS value over real gossip; refuses+logs an unverifiable value. The 2-node test `gossip/tests/gossip.rs::ml_dsa_crds_value_propagates_between_live_nodes` proves an ML-DSA-signed value propagates A→B and lands in B's table **only because** B's sigverify pass validated the post-quantum signature.
+- **frozen-abi:** `CrdsValue`/`Protocol` digests change; `MlDsaSignature`/`MlDsaPublicKey` got manual specialization-gated `AbiExample` impls. The `Protocol` digest must be regenerated under a nightly/specialization build (`SOLANA_ABI_BULK_UPDATE=1 cargo test`); it is **inert on the pinned stable 1.76 toolchain**, so it does not block our builds/tests.
+- **Sizing:** an ML-DSA `CrdsValue` is ~3.7 KB (sig 2420 + pubkey 1312 + data), which fits one gossip packet (`PUSH_MESSAGE_MAX_PAYLOAD_SIZE = PACKET_DATA_SIZE - 44 = 8148`), so no packet-constant change — but packing drops to ~3 PQ values/packet and ML-DSA verify is heavier on the `par_verify` path.
+- **⚠️ Caveats (Phase-2b core):** only the *transport + verify* path is proven live; a node does **not** yet sign its own gossip identity with ML-DSA (deferred to Phase 3). Two-node general CRDS propagation is finicky (ContactInfo propagates; stake-weighted votes don't at N=2), so the demo uses a ContactInfo value and a bidirectional `insert_info`. Pre-existing: 3 `crds_gossip_pull` bloom-filter unit tests fail on this branch independent of this work (a consequence of the fork's `PACKET_DATA_SIZE=8192`).
+
+Test it:
+```bash
+cargo test -p solana-gossip --test gossip crds_value   # CrdsSignature verify/binding/round-trip + Ed25519 regression
+cargo test -p solana-gossip --test gossip ml_dsa_crds_value_propagates_between_live_nodes  # live 2-node propagation + verify
+```
+
 ## Running the demos — combined script vs. two terminals
 All three live demos (`programs/ml-dsa-tests/demo.sh` Phase 0, `demo-transfer.sh` Phase 1, `demo-vote.sh` Phase 2) print the full keys/signatures and the **raw JSON-RPC request + response at every chain interaction** (so nothing is faked). Run any of them **two ways** from a WSL shell (bash only):
 

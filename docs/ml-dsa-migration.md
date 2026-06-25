@@ -1,7 +1,8 @@
 # Migrating to Post-Quantum Signatures (ML-DSA-44)
 
 > **Status:** Phases 0–2a delivered & verified (app-level feature + post-quantum
-> user payments + post-quantum validator votes) · Phases 2b–3 planned ·
+> user payments + post-quantum validator votes); Phase 2b (gossip CRDS signing)
+> core delivered & verified · Phase 3 (block broadcasting) planned ·
 > **Date:** 2026-06-09 **In one line:** replace the validator's signature
 > algorithm with a quantum-resistant one — feasible on our own network, not on
 > live Solana.
@@ -161,7 +162,7 @@ flowchart TB
 | ----- | ------------------------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | 1     | **App-level checks**     | 🟢 Easy                       | Self-contained; a safe warm-up that proves the technology                                                                                |
 | 2     | **Validator votes**      | 🟢 Easy (gated) · ✅ **DONE** | Almost free once payments work — a vote _is_ a transaction. Live: the validator's votes are post-quantum and the chain finalizes on them |
-| 3     | **Node-to-node chatter** | 🟡 Medium                     | Comes mostly along with the shared engine; its own size limits to widen                                                                  |
+| 3     | **Node-to-node chatter** | 🟡 Medium · ✅ **core DONE**  | Gossip CRDS values are now ML-DSA-signable and verify between live nodes; a node signing its _own_ gossip identity is deferred to #5 (shared node identity)                                                                  |
 | 4     | **User payments**        | 🟠 Hard · ✅ **DONE**         | Where both walls get solved — the linchpin. Live: an ML-DSA-signed transfer confirms on-chain                                            |
 | 5     | **Block broadcasting**   | 🔴 Hardest                    | The signature is bigger than a whole block fragment; a real redesign                                                                     |
 
@@ -189,7 +190,7 @@ flowchart TB
     P0["Phase 0 · App-level feature<br/>✅ DONE — verified live"]
     P1["Phase 1 · User payments<br/>✅ DONE — verified live"]
     P2a["Phase 2a · Votes<br/>✅ DONE — verified live"]
-    P2b["Phase 2b · Node chatter<br/>medium"]
+    P2b["Phase 2b · Node chatter<br/>✅ core done"]
     P3["Phase 3 · Block broadcasting<br/>optional · redesign"]
     P0 --> P1 --> P2a
     P1 --> P2b
@@ -198,7 +199,7 @@ flowchart TB
     style P0 fill:#d6f5d6
     style P1 fill:#d6f5d6
     style P2a fill:#d6f5d6
-    style P2b fill:#fff3cd
+    style P2b fill:#d6f5d6
     style P3 fill:#f8d7da
 ```
 
@@ -207,7 +208,7 @@ flowchart TB
 | **0 — App-level feature**  | ✅ **Done & verified.** A valid ML-DSA-44 signature is accepted and a tampered one rejected — proven by unit + integration tests **and** live over RPC on a local `solana-test-validator` (a real ~3.9 KB signed transaction confirmed on-chain). Built on the `fips204` library; required raising the packet-size ceiling (1232 → 8192 bytes) so the larger signatures fit. The technology fits.                                                                                            |
 | **1 — User payments**      | ✅ **Done & verified.** A fee payer signs a SOL transfer with ML-DSA-44 (its address = sha256(public key)); the validator verifies, executes, and confirms it live on `solana-test-validator`, and rejects a forged one. **Coexists** with Ed25519 (votes/gossip/shreds unchanged); single-signer, legacy message for now.                                                                                                                                                                   |
 | **2a — Votes**             | ✅ **Done & verified.** The validator's own consensus votes are signed with ML-DSA-44 (post-quantum), riding the Phase 1 machinery. Live on a local validator: the vote authority is a post-quantum address (no old-style key exists for it), and the chain keeps producing, **confirming, and finalizing** blocks on these votes. It's **flag-gated and coexists** — default (flag off) is unchanged Ed25519 voting, so the node never stalls; switching is a restart, not a live hot-swap. |
-| **2b — Node chatter**      | Validators sign and verify peer messages with the new scheme.                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **2b — Node chatter**      | ✅ **Core done & verified.** Gossip CRDS values can carry a post-quantum signature: `CrdsValue.signature` is now a `CrdsSignature` enum (`Ed25519` \| `MlDsa{pubkey, signature}`); verification enforces the signature **and** the `sha256(public_key)==identity` binding; an ML-DSA-signed value propagates and verifies between two live gossip nodes (`gossip/tests/gossip.rs`). Ed25519 is byte-for-byte unchanged (coexists). **Deferred:** a node signing its _own_ gossip identity with ML-DSA needs the node identity to equal the ML-DSA address, which is entangled with shred signing → Phase 3. |
 | **3 — Block broadcasting** | Blocks are signed/verified with the new scheme (likely per block, not per fragment).                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 ---
@@ -298,7 +299,9 @@ finalizing blocks (Phase 2).
 ---
 
 _Phases 0–2a (the app-level precompile, post-quantum transaction signing for
-user payments, and post-quantum validator votes) have been built and verified
-end-to-end; the engineering details live in the repo's `CLAUDE.md`
-("Post-quantum signatures" + "Phase 1" + "Phase 2" sections). Next up: Phase 2b
-(node-to-node chatter)._
+user payments, and post-quantum validator votes) plus the Phase 2b gossip core
+(ML-DSA-signable CRDS values, verified between two live nodes) have been built and
+verified end-to-end; the engineering details live in the repo's `CLAUDE.md`
+("Post-quantum signatures" + "Phase 1" + "Phase 2" + "Phase 2b" sections). Next
+up: Phase 3 (block broadcasting / shreds), which also unblocks a node signing its
+own gossip identity with ML-DSA._
