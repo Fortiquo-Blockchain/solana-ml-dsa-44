@@ -124,7 +124,10 @@ impl ShredData {
             None => Ok(legacy::ShredData::CAPACITY),
             Some((proof_size, chained, resigned)) => {
                 debug_assert!(chained || !resigned);
-                merkle::ShredData::capacity(proof_size, chained, resigned)
+                // fork (Phase 3): this dispatcher is never used to size ml_dsa
+                // shreds (the signing path calls merkle::ShredData::capacity
+                // directly with ml_dsa=true), so ml_dsa is always false here.
+                merkle::ShredData::capacity(proof_size, chained, resigned, /*ml_dsa:*/ false)
             }
         }
     }
