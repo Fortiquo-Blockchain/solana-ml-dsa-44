@@ -738,6 +738,7 @@ mod tests {
                 .unwrap()
                 .entries_to_shreds(
                     keypair,
+                    None, // ml_dsa_keypair
                     &make_entries(rng, num_entries),
                     rng.gen(), // is_last_in_slot
                     // chained_merkle_root

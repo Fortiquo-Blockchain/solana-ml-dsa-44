@@ -86,6 +86,7 @@ impl StandardBroadcastRun {
                         .unwrap();
                 let (mut shreds, coding_shreds) = shredder.entries_to_shreds(
                     keypair,
+                    None, // ml_dsa_keypair
                     &[],  // entries
                     true, // is_last_in_slot,
                     should_chain_merkle_shreds(state.slot, cluster_type)
@@ -161,6 +162,7 @@ impl StandardBroadcastRun {
             Shredder::new(slot, parent_slot, reference_tick, self.shred_version).unwrap();
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             keypair,
+            None, // ml_dsa_keypair
             entries,
             is_slot_end,
             should_chain_merkle_shreds(slot, cluster_type).then_some(chained_merkle_root),

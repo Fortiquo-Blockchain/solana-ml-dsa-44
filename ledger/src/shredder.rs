@@ -13,7 +13,7 @@ use {
     solana_entry::entry::Entry,
     solana_measure::measure::Measure,
     solana_rayon_threadlimit::get_thread_count,
-    solana_sdk::{clock::Slot, hash::Hash, signature::Keypair},
+    solana_sdk::{clock::Slot, hash::Hash, ml_dsa_keypair::MlDsaKeypair, signature::Keypair},
     std::{
         borrow::Borrow,
         fmt::Debug,
@@ -73,6 +73,10 @@ impl Shredder {
     pub fn entries_to_shreds(
         &self,
         keypair: &Keypair,
+        // fork (Phase 3): when set, FEC-set Merkle roots are additionally signed
+        // with this post-quantum ML-DSA-44 key (carried in a per-shred trailer).
+        // None preserves the unchanged Ed25519-only broadcast path.
+        ml_dsa_keypair: Option<&MlDsaKeypair>,
         entries: &[Entry],
         is_last_in_slot: bool,
         chained_merkle_root: Option<Hash>,
@@ -89,6 +93,7 @@ impl Shredder {
             return shred::make_merkle_shreds_from_entries(
                 &PAR_THREAD_POOL,
                 keypair,
+                ml_dsa_keypair,
                 entries,
                 self.slot,
                 self.parent_slot,
@@ -549,6 +554,7 @@ mod tests {
         let start_index = 0;
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             &keypair,
+            None, // ml_dsa_keypair
             &entries,
             is_last_in_slot,
             // chained_merkle_root
@@ -632,6 +638,7 @@ mod tests {
 
         let (data_shreds, _) = shredder.entries_to_shreds(
             &keypair,
+            None, // ml_dsa_keypair
             &entries,
             true, // is_last_in_slot
             // chained_merkle_root
@@ -667,6 +674,7 @@ mod tests {
 
         let (data_shreds, _) = shredder.entries_to_shreds(
             &keypair,
+            None, // ml_dsa_keypair
             &entries,
             true, // is_last_in_slot
             // chained_merkle_root,
@@ -707,6 +715,7 @@ mod tests {
 
         let (data_shreds, _) = shredder.entries_to_shreds(
             &keypair,
+            None, // ml_dsa_keypair
             &entries,
             true, // is_last_in_slot
             // chained_merkle_root
@@ -755,6 +764,7 @@ mod tests {
 
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             &keypair,
+            None, // ml_dsa_keypair
             &entries,
             true, // is_last_in_slot
             // chained_merkle_root
@@ -815,6 +825,7 @@ mod tests {
         let serialized_entries = bincode::serialize(&entries).unwrap();
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             &keypair,
+            None, // ml_dsa_keypair
             &entries,
             is_last_in_slot,
             None,  // chained_merkle_root
@@ -953,6 +964,7 @@ mod tests {
         let serialized_entries = bincode::serialize(&entries).unwrap();
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             &keypair,
+            None, // ml_dsa_keypair
             &entries,
             true,  // is_last_in_slot
             None,  // chained_merkle_root
@@ -1050,6 +1062,7 @@ mod tests {
         let reed_solomon_cache = ReedSolomonCache::default();
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             &keypair,
+            None, // ml_dsa_keypair
             &[entry],
             is_last_in_slot,
             None, // chained_merkle_root
@@ -1114,6 +1127,7 @@ mod tests {
 
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             &keypair,
+            None, // ml_dsa_keypair
             &entries,
             true, // is_last_in_slot
             // chained_merkle_root
@@ -1151,6 +1165,7 @@ mod tests {
         let start_index = 0x12;
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             &keypair,
+            None, // ml_dsa_keypair
             &entries,
             true, // is_last_in_slot
             // chained_merkle_root

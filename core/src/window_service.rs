@@ -595,6 +595,7 @@ mod test {
         let shredder = Shredder::new(slot, parent, 0, 0).unwrap();
         let (data_shreds, _) = shredder.entries_to_shreds(
             keypair,
+            None, // ml_dsa_keypair
             entries,
             true, // is_last_in_slot
             None, // chained_merkle_root

@@ -39,6 +39,7 @@ fn make_shreds(num_shreds: usize) -> Vec<Shred> {
     let shredder = Shredder::new(1, 0, 0, 0).unwrap();
     let (data_shreds, _) = shredder.entries_to_shreds(
         &Keypair::new(),
+        None, // ml_dsa_keypair
         &entries,
         true,  // is_last_in_slot
         None,  // chained_merkle_root
@@ -66,6 +67,7 @@ fn bench_shredder_ticks(bencher: &mut Bencher) {
         let shredder = Shredder::new(1, 0, 0, 0).unwrap();
         shredder.entries_to_shreds(
             &kp,
+            None, // ml_dsa_keypair
             &entries,
             true,
             chained_merkle_root,
@@ -97,6 +99,7 @@ fn bench_shredder_large_entries(bencher: &mut Bencher) {
         let shredder = Shredder::new(1, 0, 0, 0).unwrap();
         shredder.entries_to_shreds(
             &kp,
+            None, // ml_dsa_keypair
             &entries,
             true,
             chained_merkle_root,
@@ -121,6 +124,7 @@ fn bench_deshredder(bencher: &mut Bencher) {
     let chained_merkle_root = Some(Hash::new_from_array(rand::thread_rng().gen()));
     let (data_shreds, _) = shredder.entries_to_shreds(
         &kp,
+        None, // ml_dsa_keypair
         &entries,
         true,
         chained_merkle_root,

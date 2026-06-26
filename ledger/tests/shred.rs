@@ -51,6 +51,7 @@ fn test_multi_fec_block_coding() {
     let serialized_entries = bincode::serialize(&entries).unwrap();
     let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
         &keypair,
+        None, // ml_dsa_keypair
         &entries,
         true,  // is_last_in_slot
         None,  // chained_merkle_root
@@ -225,6 +226,7 @@ fn setup_different_sized_fec_blocks(
         let is_last = i == 1;
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             &keypair,
+            None, // ml_dsa_keypair
             &entries,
             is_last,
             None, // chained_merkle_root

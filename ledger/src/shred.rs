@@ -65,6 +65,7 @@ use {
     solana_sdk::{
         clock::Slot,
         hash::{hashv, Hash},
+        ml_dsa_keypair::MlDsaKeypair,
         pubkey::Pubkey,
         signature::{Keypair, Signature, Signer, SIGNATURE_BYTES},
     },
@@ -164,6 +165,9 @@ pub enum Error {
     InvalidShredVariant,
     #[error(transparent)]
     IoError(#[from] std::io::Error),
+    // fork (Phase 3): ML-DSA-44 signing of the FEC-set Merkle root failed.
+    #[error("ML-DSA signing failed")]
+    MlDsaSigningFailed,
     #[error("Unknown proof size")]
     UnknownProofSize,
 }
@@ -1060,6 +1064,8 @@ pub(crate) fn recover(
 pub(crate) fn make_merkle_shreds_from_entries(
     thread_pool: &ThreadPool,
     keypair: &Keypair,
+    // fork (Phase 3): optional post-quantum ML-DSA-44 signer (None = Ed25519 only).
+    ml_dsa_keypair: Option<&MlDsaKeypair>,
     entries: &[Entry],
     slot: Slot,
     parent_slot: Slot,
@@ -1078,6 +1084,7 @@ pub(crate) fn make_merkle_shreds_from_entries(
     let shreds = merkle::make_shreds_from_data(
         thread_pool,
         keypair,
+        ml_dsa_keypair,
         chained_merkle_root,
         &entries[..],
         slot,
@@ -1612,7 +1619,7 @@ mod tests {
         assert_matches!(ShredVariant::try_from(0b0001_0000), Err(_)); // 0x10
         assert_matches!(ShredVariant::try_from(0b0010_0000), Err(_)); // 0x20
         assert_matches!(ShredVariant::try_from(0b0011_0000), Err(_)); // 0x30
-        // Legacy coding shred.
+                                                                      // Legacy coding shred.
         assert_eq!(u8::from(ShredVariant::LegacyCode), 0b0101_1010);
         assert_eq!(ShredType::from(ShredVariant::LegacyCode), ShredType::Code);
         assert_matches!(
@@ -1647,7 +1654,12 @@ mod tests {
     #[test_case(true, true, false, 0b0111_0000)]
     #[test_case(false, false, true, 0b1110_0000)]
     #[test_case(true, false, true, 0b1111_0000)]
-    fn test_shred_variant_compat_merkle_code(chained: bool, resigned: bool, ml_dsa: bool, byte: u8) {
+    fn test_shred_variant_compat_merkle_code(
+        chained: bool,
+        resigned: bool,
+        ml_dsa: bool,
+        byte: u8,
+    ) {
         for proof_size in 0..=15u8 {
             let byte = byte | proof_size;
             assert_eq!(
@@ -1704,7 +1716,12 @@ mod tests {
     #[test_case(true, true, false, 0b1011_0000)]
     #[test_case(false, false, true, 0b1100_0000)]
     #[test_case(true, false, true, 0b1101_0000)]
-    fn test_shred_variant_compat_merkle_data(chained: bool, resigned: bool, ml_dsa: bool, byte: u8) {
+    fn test_shred_variant_compat_merkle_data(
+        chained: bool,
+        resigned: bool,
+        ml_dsa: bool,
+        byte: u8,
+    ) {
         for proof_size in 0..=15u8 {
             let byte = byte | proof_size;
             assert_eq!(

@@ -24,6 +24,7 @@ use {
         clock::Slot,
         hash::{hashv, Hash},
         ml_dsa_keypair::MlDsaKeypair,
+        ml_dsa_public_key::MlDsaPublicKey,
         pubkey::Pubkey,
         signature::{Signature, Signer},
         signer::keypair::Keypair,
@@ -122,6 +123,20 @@ impl Shred {
     dispatch!(fn set_merkle_proof(&mut self, proof: &[&MerkleProofEntry]) -> Result<(), Error>);
     dispatch!(fn set_signature(&mut self, signature: Signature));
     dispatch!(fn signed_data(&self) -> Result<Hash, Error>);
+    // fork (Phase 3): post-quantum ml_dsa commitment + trailer writers.
+    // (dispatch! supports at most one arg, so set_ml_dsa_trailer is hand-written.)
+    dispatch!(fn set_ml_dsa_commitment(&mut self, commitment: &[u8; SIZE_OF_ML_DSA_COMMITMENT]) -> Result<(), Error>);
+
+    fn set_ml_dsa_trailer(
+        &mut self,
+        pubkey: &[u8; SIZE_OF_ML_DSA_PUBKEY],
+        signature: &[u8; SIZE_OF_ML_DSA_SIGNATURE],
+    ) -> Result<(), Error> {
+        match self {
+            Self::ShredCode(shred) => shred.set_ml_dsa_trailer(pubkey, signature),
+            Self::ShredData(shred) => shred.set_ml_dsa_trailer(pubkey, signature),
+        }
+    }
 
     fn merkle_proof(&self) -> Result<impl Iterator<Item = &MerkleProofEntry>, Error> {
         match self {
@@ -234,7 +249,8 @@ impl ShredData {
         else {
             return Err(Error::InvalidShredVariant);
         };
-        Ok(Self::SIZE_OF_HEADERS + Self::capacity(proof_size, /*chained:*/ true, resigned, ml_dsa)?)
+        Ok(Self::SIZE_OF_HEADERS
+            + Self::capacity(proof_size, /*chained:*/ true, resigned, ml_dsa)?)
     }
 
     fn set_chained_merkle_root(&mut self, chained_merkle_root: &Hash) -> Result<(), Error> {
@@ -323,6 +339,33 @@ impl ShredData {
         Ok(())
     }
 
+    // fork (Phase 3): write the post-quantum commitment / trailer. The shred's
+    // ShredVariant must already carry ml_dsa=true so proof_offset/capacity
+    // reserve room for these regions.
+    fn set_ml_dsa_commitment(
+        &mut self,
+        commitment: &[u8; SIZE_OF_ML_DSA_COMMITMENT],
+    ) -> Result<(), Error> {
+        let proof_offset = self.proof_offset()?;
+        write_ml_dsa_commitment(&mut self.payload, proof_offset, commitment)
+    }
+
+    fn set_ml_dsa_trailer(
+        &mut self,
+        pubkey: &[u8; SIZE_OF_ML_DSA_PUBKEY],
+        signature: &[u8; SIZE_OF_ML_DSA_SIGNATURE],
+    ) -> Result<(), Error> {
+        let proof_offset = self.proof_offset()?;
+        let proof_size = self.proof_size()?;
+        write_ml_dsa_trailer(
+            &mut self.payload,
+            proof_offset,
+            proof_size,
+            pubkey,
+            signature,
+        )
+    }
+
     pub(super) fn get_merkle_root(
         shred: &[u8],
         proof_size: u8,
@@ -374,8 +417,8 @@ impl ShredCode {
     ) -> Result<usize, Error> {
         debug_assert!(chained || !resigned);
         debug_assert!(!(ml_dsa && resigned)); // fork: v1 does not ml_dsa-sign the resigned set
-        // Merkle proof is generated and signed after coding shreds are
-        // generated. Coding shred headers cannot be erasure coded either.
+                                              // Merkle proof is generated and signed after coding shreds are
+                                              // generated. Coding shred headers cannot be erasure coded either.
         Self::SIZE_OF_PAYLOAD
             .checked_sub(
                 Self::SIZE_OF_HEADERS
@@ -423,7 +466,8 @@ impl ShredCode {
         else {
             return Err(Error::InvalidShredVariant);
         };
-        Ok(Self::SIZE_OF_HEADERS + Self::capacity(proof_size, /*chained:*/ true, resigned, ml_dsa)?)
+        Ok(Self::SIZE_OF_HEADERS
+            + Self::capacity(proof_size, /*chained:*/ true, resigned, ml_dsa)?)
     }
 
     fn chained_merkle_root(&self) -> Result<Hash, Error> {
@@ -517,6 +561,33 @@ impl ShredCode {
             bincode::serialize_into(&mut cursor, entry)?;
         }
         Ok(())
+    }
+
+    // fork (Phase 3): write the post-quantum commitment / trailer. The shred's
+    // ShredVariant must already carry ml_dsa=true so proof_offset/capacity
+    // reserve room for these regions.
+    fn set_ml_dsa_commitment(
+        &mut self,
+        commitment: &[u8; SIZE_OF_ML_DSA_COMMITMENT],
+    ) -> Result<(), Error> {
+        let proof_offset = self.proof_offset()?;
+        write_ml_dsa_commitment(&mut self.payload, proof_offset, commitment)
+    }
+
+    fn set_ml_dsa_trailer(
+        &mut self,
+        pubkey: &[u8; SIZE_OF_ML_DSA_PUBKEY],
+        signature: &[u8; SIZE_OF_ML_DSA_SIGNATURE],
+    ) -> Result<(), Error> {
+        let proof_offset = self.proof_offset()?;
+        let proof_size = self.proof_size()?;
+        write_ml_dsa_trailer(
+            &mut self.payload,
+            proof_offset,
+            proof_size,
+            pubkey,
+            signature,
+        )
     }
 
     pub(super) fn get_merkle_root(
@@ -825,6 +896,49 @@ fn get_merkle_node(shred: &[u8], offsets: Range<usize>) -> Result<Hash, Error> {
     Ok(hashv(&[MERKLE_HASH_PREFIX_LEAF, node]))
 }
 
+// fork (Phase 3): the 32-byte ml_dsa commitment (sha256 of the leader's ml_dsa
+// public key) sits immediately before the merkle proof, inside the signed
+// merkle region. `proof_offset` is the start of the merkle proof.
+fn write_ml_dsa_commitment(
+    payload: &mut [u8],
+    proof_offset: usize,
+    commitment: &[u8; SIZE_OF_ML_DSA_COMMITMENT],
+) -> Result<(), Error> {
+    let payload_len = payload.len();
+    let start = proof_offset
+        .checked_sub(SIZE_OF_ML_DSA_COMMITMENT)
+        .ok_or(Error::InvalidPayloadSize(payload_len))?;
+    payload
+        .get_mut(start..proof_offset)
+        .ok_or(Error::InvalidPayloadSize(payload_len))?
+        .copy_from_slice(commitment);
+    Ok(())
+}
+
+// fork (Phase 3): the ml_dsa trailer [pubkey || signature] sits after the
+// merkle proof, outside the signed merkle region.
+fn write_ml_dsa_trailer(
+    payload: &mut [u8],
+    proof_offset: usize,
+    proof_size: u8,
+    pubkey: &[u8; SIZE_OF_ML_DSA_PUBKEY],
+    signature: &[u8; SIZE_OF_ML_DSA_SIGNATURE],
+) -> Result<(), Error> {
+    let payload_len = payload.len();
+    let trailer = proof_offset + usize::from(proof_size) * SIZE_OF_MERKLE_PROOF_ENTRY;
+    let pubkey_end = trailer + SIZE_OF_ML_DSA_PUBKEY;
+    let sig_end = pubkey_end + SIZE_OF_ML_DSA_SIGNATURE;
+    payload
+        .get_mut(trailer..pubkey_end)
+        .ok_or(Error::InvalidPayloadSize(payload_len))?
+        .copy_from_slice(pubkey);
+    payload
+        .get_mut(pubkey_end..sig_end)
+        .ok_or(Error::InvalidPayloadSize(payload_len))?
+        .copy_from_slice(signature);
+    Ok(())
+}
+
 fn make_merkle_tree(mut nodes: Vec<Hash>) -> Vec<Hash> {
     let mut size = nodes.len();
     while size > 1 {
@@ -1070,6 +1184,10 @@ fn get_proof_size(num_shreds: usize) -> u8 {
 pub(super) fn make_shreds_from_data(
     thread_pool: &ThreadPool,
     keypair: &Keypair,
+    // fork (Phase 3): when set, each FEC-set Merkle root is additionally signed
+    // with this post-quantum ML-DSA-44 key, and the signature + public key are
+    // carried in a trailer on every shred. None => unchanged Ed25519-only path.
+    ml_dsa_keypair: Option<&MlDsaKeypair>,
     // The Merkle root of the previous erasure batch if chained.
     chained_merkle_root: Option<Hash>,
     mut data: &[u8], // Serialized &[Entry]
@@ -1101,9 +1219,11 @@ pub(super) fn make_shreds_from_data(
     let now = Instant::now();
     let chained = chained_merkle_root.is_some();
     let resigned = chained && is_last_in_slot;
-    // fork (Phase 3): Step 2 derives this from the optional ML-DSA shred keypair.
-    // Step 1 keeps it false so shred bytes are byte-identical to the Ed25519 path.
-    let ml_dsa = false;
+    // fork (Phase 3): a post-quantum shred when an ML-DSA keypair is supplied.
+    // None => false => shred bytes are byte-identical to the Ed25519 path. v1
+    // never combines ml_dsa with resigned, so the slot's final (resigned) FEC
+    // set stays Ed25519-only.
+    let ml_dsa = ml_dsa_keypair.is_some() && !resigned;
     let erasure_batch_size =
         shredder::get_erasure_batch_size(DATA_SHREDS_PER_FEC_BLOCK, is_last_in_slot);
     let proof_size = get_proof_size(erasure_batch_size);
@@ -1247,6 +1367,7 @@ pub(super) fn make_shreds_from_data(
                     Some(
                         make_erasure_batch(
                             keypair,
+                            ml_dsa_keypair,
                             shreds,
                             Some(*chained_merkle_root),
                             next_code_index,
@@ -1268,6 +1389,7 @@ pub(super) fn make_shreds_from_data(
             .map(|(shreds, next_code_index)| {
                 make_erasure_batch(
                     keypair,
+                    ml_dsa_keypair,
                     shreds,
                     None, // chained_merkle_root
                     next_code_index,
@@ -1285,6 +1407,7 @@ pub(super) fn make_shreds_from_data(
                 .map(|(shreds, next_code_index)| {
                     make_erasure_batch(
                         keypair,
+                        ml_dsa_keypair,
                         shreds,
                         None, // chained_merkle_root
                         next_code_index,
@@ -1304,6 +1427,8 @@ pub(super) fn make_shreds_from_data(
 // shreds and attaches signature.
 fn make_erasure_batch(
     keypair: &Keypair,
+    // fork (Phase 3): optional post-quantum ML-DSA-44 signer for this FEC set.
+    ml_dsa_keypair: Option<&MlDsaKeypair>,
     mut shreds: Vec<ShredData>,
     // The Merkle root of the previous erasure batch if chained.
     chained_merkle_root: Option<Hash>,
@@ -1314,9 +1439,12 @@ fn make_erasure_batch(
     let num_data_shreds = shreds.len();
     let chained = chained_merkle_root.is_some();
     let resigned = chained && is_last_in_slot;
-    // fork (Phase 3): Step 2 derives this from the optional ML-DSA shred keypair.
-    // Step 1 keeps it false so shred bytes are byte-identical to the Ed25519 path.
-    let ml_dsa = false;
+    // fork (Phase 3): a post-quantum shred when an ML-DSA keypair is supplied,
+    // except the resigned (final) FEC set which stays Ed25519-only in v1. Drop
+    // the keypair when disabled so the commitment/trailer signing below is
+    // skipped in lockstep with the ml_dsa variant flag.
+    let ml_dsa = ml_dsa_keypair.is_some() && !resigned;
+    let ml_dsa_keypair = if ml_dsa { ml_dsa_keypair } else { None };
     let erasure_batch_size = shredder::get_erasure_batch_size(num_data_shreds, is_last_in_slot);
     let num_coding_shreds = erasure_batch_size - num_data_shreds;
     let proof_size = get_proof_size(erasure_batch_size);
@@ -1379,6 +1507,16 @@ fn make_erasure_batch(
         common_header.index += 1;
         coding_header.position += 1;
     }
+    // fork (Phase 3): write the ml_dsa pubkey commitment (sha256 of the leader's
+    // ML-DSA public key) into the signed merkle region of every shred *before*
+    // the tree is computed, so the Ed25519 root transitively authenticates the
+    // ml_dsa public key carried in the trailer.
+    if let Some(ml_dsa_keypair) = ml_dsa_keypair {
+        let commitment = ml_dsa_keypair.address().to_bytes();
+        for shred in &mut shreds {
+            shred.set_ml_dsa_commitment(&commitment)?;
+        }
+    }
     // Compute Merkle tree for the erasure batch.
     let tree = make_merkle_tree(
         shreds
@@ -1389,6 +1527,16 @@ fn make_erasure_batch(
     // Sign root of Merkle tree.
     let root = tree.last().ok_or(Error::InvalidMerkleProof)?;
     let signature = keypair.sign_message(root.as_ref());
+    // fork (Phase 3): additionally sign the same root once with ML-DSA-44. The
+    // signature is shared by every shred in the FEC set, exactly like Ed25519.
+    let ml_dsa_signature = match ml_dsa_keypair {
+        Some(ml_dsa_keypair) => Some(
+            ml_dsa_keypair
+                .sign(root.as_ref())
+                .map_err(|_| Error::MlDsaSigningFailed)?,
+        ),
+        None => None,
+    };
     // Populate merkle proof for all shreds and attach signature.
     for (index, shred) in shreds.iter_mut().enumerate() {
         let proof =
@@ -1396,6 +1544,13 @@ fn make_erasure_batch(
         debug_assert_eq!(proof.len(), usize::from(proof_size));
         shred.set_merkle_proof(&proof)?;
         shred.set_signature(signature);
+        // fork (Phase 3): attach the post-quantum [pubkey || signature] trailer.
+        if let (Some(ml_dsa_keypair), Some(ml_dsa_signature)) = (ml_dsa_keypair, &ml_dsa_signature)
+        {
+            shred.set_ml_dsa_trailer(ml_dsa_keypair.public_key_bytes(), ml_dsa_signature)?;
+            debug_assert!(MlDsaPublicKey::from(*ml_dsa_keypair.public_key_bytes())
+                .verify(root.as_ref(), ml_dsa_signature));
+        }
         debug_assert!(shred.verify(&keypair.pubkey()));
         debug_assert_matches!(shred.sanitize(), Ok(()));
         // Assert that shred payload is fully populated.
@@ -1425,7 +1580,12 @@ mod test {
     };
 
     // Total size of a data shred including headers and merkle proof.
-    fn shred_data_size_of_payload(proof_size: u8, chained: bool, resigned: bool, ml_dsa: bool) -> usize {
+    fn shred_data_size_of_payload(
+        proof_size: u8,
+        chained: bool,
+        resigned: bool,
+        ml_dsa: bool,
+    ) -> usize {
         assert!(chained || !resigned);
         ShredData::SIZE_OF_HEADERS
             + ShredData::capacity(proof_size, chained, resigned, ml_dsa).unwrap()
@@ -1576,7 +1736,8 @@ mod test {
         let keypair = Keypair::new();
         let num_shreds = num_data_shreds + num_coding_shreds;
         let proof_size = get_proof_size(num_shreds);
-        let capacity = ShredData::capacity(proof_size, chained, resigned, /*ml_dsa:*/ false).unwrap();
+        let capacity =
+            ShredData::capacity(proof_size, chained, resigned, /*ml_dsa:*/ false).unwrap();
         let common_header = ShredCommonHeader {
             signature: Signature::default(),
             shred_variant: ShredVariant::MerkleData {
@@ -1806,6 +1967,187 @@ mod test {
         }
     }
 
+    // fork (Phase 3): smoke-test post-quantum ML-DSA-44 shred signing. The
+    // in-signing debug_assert!s inside make_erasure_batch (Ed25519 verify, the
+    // ml_dsa trailer MlDsaPublicKey::verify, payload round-trip) validate the
+    // crypto; here we assert the ml_dsa variant, the unchanged Ed25519 liveness
+    // path, and that the input data is still recoverable at reduced capacity.
+    // is_last_in_slot is false so the set is not resigned (ml_dsa requires
+    // !resigned). chained=false exercises 0xC0/0xE0, chained=true 0xD0/0xF0.
+    #[test_case(false)]
+    #[test_case(true)]
+    fn test_make_ml_dsa_shreds(chained: bool) {
+        let mut rng = rand::thread_rng();
+        let reed_solomon_cache = ReedSolomonCache::default();
+        let thread_pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let keypair = Keypair::new();
+        let ml_dsa_keypair = MlDsaKeypair::from_seed(&[42u8; 32]);
+        let chained_merkle_root = chained.then(|| Hash::new_from_array(rng.gen()));
+        let slot = 149_745_689;
+        let parent_slot = slot - rng.gen_range(1..65536);
+        // ~200 KB spans multiple FEC sets (ml_dsa data capacity is ~4 KB/shred,
+        // 32 data shreds per batch => ~128 KB/set), exercising the per-batch
+        // chained-root + commitment interaction.
+        let mut data = vec![0u8; 200_000];
+        rng.fill(&mut data[..]);
+        let shreds = make_shreds_from_data(
+            &thread_pool,
+            &keypair,
+            Some(&ml_dsa_keypair),
+            chained_merkle_root,
+            &data[..],
+            slot,
+            parent_slot,
+            rng.gen(),            // shred_version
+            rng.gen_range(1..64), // reference_tick
+            false,                // is_last_in_slot
+            0,                    // next_shred_index
+            0,                    // next_code_index
+            &reed_solomon_cache,
+            &mut ProcessShredsStats::default(),
+        )
+        .unwrap();
+        let shreds: Vec<_> = shreds.into_iter().flatten().collect();
+        assert!(!shreds.is_empty());
+        let pubkey = keypair.pubkey();
+        for shred in &shreds {
+            assert!(
+                matches!(
+                    shred.common_header().shred_variant,
+                    ShredVariant::MerkleData {
+                        ml_dsa: true,
+                        resigned: false,
+                        ..
+                    } | ShredVariant::MerkleCode {
+                        ml_dsa: true,
+                        resigned: false,
+                        ..
+                    }
+                ),
+                "expected ml_dsa variant, got {:?}",
+                shred.common_header().shred_variant
+            );
+            // The Ed25519 signature over the Merkle root still verifies: the
+            // ml_dsa trailer does not disturb the Ed25519 liveness path.
+            assert!(shred.verify(&pubkey));
+            assert_matches!(shred.sanitize(), Ok(()));
+        }
+        // The original data is still recoverable from the reduced-capacity shreds.
+        let data_shreds: Vec<_> = shreds
+            .iter()
+            .filter_map(|shred| match shred {
+                Shred::ShredData(shred) => Some(shred),
+                Shred::ShredCode(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            data,
+            data_shreds
+                .iter()
+                .flat_map(|shred| shred.data().unwrap())
+                .copied()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // fork (Phase 3): the resigned (final) FEC set must stay Ed25519-only even
+    // when an ML-DSA keypair is supplied (ml_dsa + resigned is invalid in v1).
+    // This must produce plain shreds and must NOT panic.
+    #[test]
+    fn test_ml_dsa_resigned_set_is_ed25519_only() {
+        let mut rng = rand::thread_rng();
+        let reed_solomon_cache = ReedSolomonCache::default();
+        let thread_pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let keypair = Keypair::new();
+        let ml_dsa_keypair = MlDsaKeypair::from_seed(&[7u8; 32]);
+        let chained_merkle_root = Some(Hash::new_from_array(rng.gen()));
+        let slot = 149_745_689;
+        let mut data = vec![0u8; 4_000];
+        rng.fill(&mut data[..]);
+        let shreds = make_shreds_from_data(
+            &thread_pool,
+            &keypair,
+            Some(&ml_dsa_keypair),
+            chained_merkle_root,
+            &data[..],
+            slot,
+            slot - 1,
+            rng.gen(),
+            rng.gen_range(1..64),
+            true, // is_last_in_slot => resigned => ml_dsa disabled in v1
+            0,
+            0,
+            &reed_solomon_cache,
+            &mut ProcessShredsStats::default(),
+        )
+        .unwrap();
+        let shreds: Vec<_> = shreds.into_iter().flatten().collect();
+        assert!(!shreds.is_empty());
+        for shred in &shreds {
+            assert!(
+                matches!(
+                    shred.common_header().shred_variant,
+                    ShredVariant::MerkleData {
+                        ml_dsa: false,
+                        resigned: true,
+                        ..
+                    } | ShredVariant::MerkleCode {
+                        ml_dsa: false,
+                        resigned: true,
+                        ..
+                    }
+                ),
+                "resigned set must be Ed25519-only, got {:?}",
+                shred.common_header().shred_variant
+            );
+            assert!(shred.verify(&keypair.pubkey()));
+        }
+    }
+
+    // fork (Phase 3): v1 does not reconstruct the ml_dsa commitment during
+    // erasure recovery (the commitment is shared FEC-set state, not part of the
+    // erasure-coded shard). Recovering a partial ml_dsa set must therefore fail
+    // cleanly — Err, never a panic — so the caller falls back to repair.
+    #[test]
+    fn test_recover_ml_dsa_set_fails_cleanly() {
+        let mut rng = rand::thread_rng();
+        let reed_solomon_cache = ReedSolomonCache::default();
+        let thread_pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let keypair = Keypair::new();
+        let ml_dsa_keypair = MlDsaKeypair::from_seed(&[9u8; 32]);
+        let slot = 149_745_689;
+        let mut data = vec![0u8; 5_000];
+        rng.fill(&mut data[..]);
+        let batches = make_shreds_from_data(
+            &thread_pool,
+            &keypair,
+            Some(&ml_dsa_keypair),
+            None, // not chained
+            &data[..],
+            slot,
+            slot - 1,
+            rng.gen(),
+            rng.gen_range(1..64),
+            false, // is_last_in_slot
+            0,
+            0,
+            &reed_solomon_cache,
+            &mut ProcessShredsStats::default(),
+        )
+        .unwrap();
+        // Take one FEC set (data + coding shreds) and drop a single data shred,
+        // then attempt recovery. RS can reconstruct the data buffer, but the
+        // recovered shred has a zeroed commitment, so its Merkle node diverges
+        // and recovery must reject the set rather than emit a malformed shred.
+        let mut fec_set: Vec<Shred> = batches.into_iter().next().unwrap();
+        let first_data = fec_set
+            .iter()
+            .position(|shred| matches!(shred, Shred::ShredData(_)))
+            .unwrap();
+        fec_set.remove(first_data);
+        assert_matches!(recover(fec_set, &reed_solomon_cache), Err(_));
+    }
+
     fn run_make_shreds_from_data<R: Rng>(
         rng: &mut R,
         data_size: usize,
@@ -1828,6 +2170,7 @@ mod test {
         let shreds = make_shreds_from_data(
             &thread_pool,
             &keypair,
+            None, // ml_dsa_keypair
             chained_merkle_root,
             &data[..],
             slot,

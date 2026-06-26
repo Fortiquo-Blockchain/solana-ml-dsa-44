@@ -104,6 +104,7 @@ fn bench_retransmitter(bencher: &mut Bencher) {
     let shredder = Shredder::new(slot, parent, 0, 0).unwrap();
     let (mut data_shreds, _) = shredder.entries_to_shreds(
         &keypair,
+        None, // ml_dsa_keypair
         &entries,
         true, // is_last_in_slot
         // chained_merkle_root

@@ -407,6 +407,7 @@ pub(crate) mod tests {
         .collect();
         shredder.entries_to_shreds(
             keypair,
+            None, // ml_dsa_keypair
             &entries,
             is_last_in_slot,
             // chained_merkle_root

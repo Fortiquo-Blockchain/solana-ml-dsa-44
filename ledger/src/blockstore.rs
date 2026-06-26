@@ -1934,6 +1934,7 @@ impl Blockstore {
                 };
                 let (mut data_shreds, mut coding_shreds) = shredder.entries_to_shreds(
                     keypair,
+                    None, // ml_dsa_keypair
                     &current_entries,
                     true, // is_last_in_slot
                     chained_merkle_root,
@@ -1964,6 +1965,7 @@ impl Blockstore {
         if !slot_entries.is_empty() {
             let (mut data_shreds, mut coding_shreds) = shredder.entries_to_shreds(
                 keypair,
+                None, // ml_dsa_keypair
                 &slot_entries,
                 is_full_slot,
                 chained_merkle_root,
@@ -4239,6 +4241,7 @@ pub fn create_new_ledger(
     let shredder = Shredder::new(0, 0, 0, version).unwrap();
     let (shreds, _) = shredder.entries_to_shreds(
         &Keypair::new(),
+        None, // ml_dsa_keypair
         &entries,
         true, // is_last_in_slot
         // chained_merkle_root
@@ -4503,6 +4506,7 @@ pub fn entries_to_test_shreds(
         .unwrap()
         .entries_to_shreds(
             &Keypair::new(),
+            None, // ml_dsa_keypair
             entries,
             is_full_slot,
             // chained_merkle_root
@@ -9825,6 +9829,7 @@ pub mod tests {
         let shredder = Shredder::new(slot, parent_slot, 0, 0).unwrap();
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             &leader_keypair,
+            None, // ml_dsa_keypair
             &entries,
             true, // is_last_in_slot
             // chained_merkle_root
@@ -9893,6 +9898,7 @@ pub mod tests {
         let chained_merkle_root = chained.then(|| Hash::new_from_array(rand::thread_rng().gen()));
         let (shreds, _) = shredder.entries_to_shreds(
             &leader_keypair,
+            None, // ml_dsa_keypair
             &entries1,
             true, // is_last_in_slot
             chained_merkle_root,
@@ -9904,6 +9910,7 @@ pub mod tests {
         );
         let (duplicate_shreds, _) = shredder.entries_to_shreds(
             &leader_keypair,
+            None, // ml_dsa_keypair
             &entries2,
             true, // is_last_in_slot
             chained_merkle_root,

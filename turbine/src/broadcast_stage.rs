@@ -551,6 +551,7 @@ pub mod test {
         .unwrap();
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             &Keypair::new(),
+            None, // ml_dsa_keypair
             &entries,
             true, // is_last_in_slot
             // chained_merkle_root
