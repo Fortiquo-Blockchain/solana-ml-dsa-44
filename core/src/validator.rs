@@ -276,6 +276,10 @@ pub struct ValidatorConfig {
     /// ML-DSA-44 key (post-quantum), carried in a per-shred trailer. `None` = unchanged
     /// Ed25519-only shred broadcasting.
     pub ml_dsa_shred: Option<Arc<MlDsaKeypair>>,
+    /// Phase 3: when true (--ml-dsa-shred-strict), turbine drops received ml_dsa shreds that
+    /// fail post-quantum verification. `false` = advisory/non-gating (default), so an ml_dsa
+    /// verification gap can never stall the node.
+    pub ml_dsa_shred_strict: bool,
 }
 
 impl Default for ValidatorConfig {
@@ -346,6 +350,7 @@ impl Default for ValidatorConfig {
             unified_scheduler_handler_threads: None,
             ml_dsa_voter: None,
             ml_dsa_shred: None,
+            ml_dsa_shred_strict: false,
         }
     }
 }
@@ -1317,6 +1322,7 @@ impl Validator {
                 repair_whitelist: config.repair_whitelist.clone(),
                 wait_for_vote_to_start_leader,
                 replay_slots_concurrently: config.replay_slots_concurrently,
+                ml_dsa_shred_strict: config.ml_dsa_shred_strict,
             },
             &max_slots,
             block_metadata_notifier,

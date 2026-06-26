@@ -145,6 +145,9 @@ pub struct TestValidatorGenesis {
     /// Phase 3: when set, this validator additionally signs each FEC-set Merkle root with
     /// this ML-DSA-44 key (post-quantum) when broadcasting shreds as leader.
     pub ml_dsa_shred: Option<Arc<MlDsaKeypair>>,
+    /// Phase 3: when true, turbine drops received ml_dsa shreds that fail post-quantum
+    /// verification (default false = advisory/non-gating).
+    pub ml_dsa_shred_strict: bool,
     pub staked_nodes_overrides: Arc<RwLock<HashMap<Pubkey, u64>>>,
     pub max_ledger_shreds: Option<u64>,
     pub max_genesis_archive_unpacked_size: Option<u64>,
@@ -181,6 +184,7 @@ impl Default for TestValidatorGenesis {
             authorized_voter_keypairs: Arc::<RwLock<Vec<Arc<Keypair>>>>::default(),
             ml_dsa_voter: None,
             ml_dsa_shred: None,
+            ml_dsa_shred_strict: false,
             staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
             max_ledger_shreds: Option::<u64>::default(),
             max_genesis_archive_unpacked_size: Option::<u64>::default(),
@@ -227,6 +231,13 @@ impl TestValidatorGenesis {
     /// in addition to Ed25519, so upgraded peers can post-quantum-verify its blocks.
     pub fn ml_dsa_shred(&mut self, ml_dsa_shred: Arc<MlDsaKeypair>) -> &mut Self {
         self.ml_dsa_shred = Some(ml_dsa_shred);
+        self
+    }
+
+    /// Phase 3: when true, turbine drops received ML-DSA-44 shreds that fail post-quantum
+    /// verification (default false = advisory/non-gating).
+    pub fn ml_dsa_shred_strict(&mut self, ml_dsa_shred_strict: bool) -> &mut Self {
+        self.ml_dsa_shred_strict = ml_dsa_shred_strict;
         self
     }
 
@@ -1040,6 +1051,8 @@ impl TestValidator {
         // Phase 3: thread the ML-DSA shred key into the validator so the broadcast stage
         // post-quantum-signs shreds as leader (None = unchanged Ed25519 broadcasting).
         validator_config.ml_dsa_shred = config.ml_dsa_shred.clone();
+        // Phase 3: thread the strict-verify flag so turbine drops failing ml_dsa shreds.
+        validator_config.ml_dsa_shred_strict = config.ml_dsa_shred_strict;
 
         // Phase 2: ML-DSA votes are submitted as raw 0x00 UDP packets to the node's own
         // regular TPU (they cannot ride gossip CRDS or the vote-only port). The regular TPU

@@ -144,6 +144,50 @@ pub fn audit_ml_dsa_shreds(
     (ok, fail)
 }
 
+// fork (Phase 3): GATING variant of audit_ml_dsa_shreds, used only under the
+// opt-in --ml-dsa-shred-strict flag. Same per-shred verification, but DROPS
+// (set_discard) any ml_dsa shred that fails. Non-ml_dsa packets are untouched
+// (their Ed25519 gate already ran). Default validators use the non-gating audit
+// pass; strict mode is opt-in so an ml_dsa verification gap can never stall the
+// node unless the operator explicitly asks to enforce it. Returns (ok, fail).
+pub fn enforce_ml_dsa_shreds(
+    batches: &mut [PacketBatch],
+    slot_leaders: &HashMap<Slot, Pubkey>,
+) -> (usize, usize) {
+    let (mut ok, mut fail) = (0usize, 0usize);
+    for batch in batches.iter_mut() {
+        for packet in batch.iter_mut() {
+            if packet.meta().discard() {
+                continue;
+            }
+            // Drop the get_shred borrow before the mutable set_discard below.
+            let is_ml_dsa = shred::layout::get_shred(packet)
+                .map(shred::layout::is_ml_dsa_shred)
+                .unwrap_or(false);
+            if !is_ml_dsa {
+                continue;
+            }
+            if verify_shred_ml_dsa_cpu(packet, slot_leaders) {
+                ok += 1;
+            } else {
+                fail += 1;
+                packet.meta_mut().set_discard(true);
+            }
+        }
+    }
+    if ok > 0 {
+        inc_new_counter_info!("ml_dsa_shred_verify_ok", ok);
+    }
+    if fail > 0 {
+        inc_new_counter_warn!("ml_dsa_shred_verify_fail", fail);
+        // Strict mode dropped these; a distinct counter makes the enforcement
+        // action observable separately from the advisory-only fail count (which
+        // audit_ml_dsa_shreds also emits without discarding).
+        inc_new_counter_warn!("ml_dsa_shred_dropped", fail);
+    }
+    (ok, fail)
+}
+
 fn verify_shreds_cpu(
     thread_pool: &ThreadPool,
     batches: &[PacketBatch],
@@ -746,6 +790,67 @@ mod tests {
         // The non-gating audit pass counts the honest shred as ok.
         let batches = [PacketBatch::new(vec![to_packet(&shred)])];
         assert_eq!(audit_ml_dsa_shreds(&batches, &leader_slots), (1, 0));
+    }
+
+    // fork (Phase 3): a tampered ml_dsa shred is dropped under strict enforcement
+    // (--ml-dsa-shred-strict) but left untouched by the default advisory audit.
+    // Crucially, strict mode only ever touches ml_dsa shreds: a plain Ed25519
+    // shred is never discarded (else strict mode would partition the node from
+    // turbine), and already-discarded packets are skipped.
+    #[test]
+    fn test_enforce_ml_dsa_shreds_strict_vs_audit() {
+        solana_logger::setup();
+        let mut rng = rand::thread_rng();
+        let slot = 0xdead_c0de;
+        let keypair = Keypair::new();
+        let ml_dsa_keypair = MlDsaKeypair::from_seed(&[5u8; 32]);
+        let leader_slots = HashMap::from([(slot, keypair.pubkey())]);
+        let honest = make_ml_dsa_data_shred(&mut rng, slot, &keypair, &ml_dsa_keypair, false);
+
+        // Flip the last trailer byte => the ml_dsa signature fails to verify.
+        let mut tampered = to_packet(&honest);
+        let size = tampered.meta().size;
+        tampered.buffer_mut()[size - 1] ^= 0xff;
+
+        // A plain Ed25519 (non-ml_dsa) shred — strict mode must never touch it.
+        let mut ed_shred = Shred::new_from_data(
+            slot,
+            0,
+            0,
+            &[1, 2, 3, 4],
+            ShredFlags::LAST_SHRED_IN_SLOT,
+            0,
+            0,
+            0,
+        );
+        ed_shred.sign(&keypair);
+
+        // An already-discarded ml_dsa packet — both passes must skip it.
+        let mut predropped = to_packet(&honest);
+        predropped.meta_mut().set_discard(true);
+
+        let mut batches = [PacketBatch::new(vec![
+            to_packet(&honest),
+            tampered,
+            to_packet(&ed_shred),
+            predropped,
+        ])];
+
+        // Advisory audit is non-gating: counts (1 ok, 1 fail) and discards nothing
+        // new (the Ed25519 and already-discarded packets are skipped, not counted).
+        assert_eq!(audit_ml_dsa_shreds(&batches, &leader_slots), (1, 1));
+        assert!(!batches[0][0].meta().discard()); // honest ml_dsa
+        assert!(!batches[0][1].meta().discard()); // tampered ml_dsa (advisory keeps)
+        assert!(!batches[0][2].meta().discard()); // plain Ed25519
+        assert!(batches[0][3].meta().discard()); // pre-discarded stays discarded
+
+        // Strict enforcement drops ONLY the failing ml_dsa shred; the honest and
+        // the plain Ed25519 shred are kept, and the pre-discarded one is skipped.
+        assert_eq!(enforce_ml_dsa_shreds(&mut batches, &leader_slots), (1, 1));
+        assert!(!batches[0][0].meta().discard()); // honest ml_dsa kept
+        assert!(batches[0][1].meta().discard()); // tampered ml_dsa dropped
+        assert!(!batches[0][2].meta().discard()); // plain Ed25519 untouched
+        assert!(batches[0][3].meta().discard()); // pre-discarded unchanged
     }
 
     fn run_test_sigverify_shreds_cpu(thread_pool: &ThreadPool, slot: Slot) {

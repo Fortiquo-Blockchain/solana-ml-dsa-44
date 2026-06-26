@@ -93,6 +93,9 @@ pub struct TvuConfig {
     pub repair_whitelist: Arc<RwLock<HashSet<Pubkey>>>,
     pub wait_for_vote_to_start_leader: bool,
     pub replay_slots_concurrently: bool,
+    // fork (Phase 3): --ml-dsa-shred-strict — turbine drops ml_dsa shreds that
+    // fail post-quantum verification (default false = advisory/non-gating).
+    pub ml_dsa_shred_strict: bool,
 }
 
 impl Tvu {
@@ -184,6 +187,7 @@ impl Tvu {
             fetch_receiver,
             retransmit_sender.clone(),
             verified_sender,
+            tvu_config.ml_dsa_shred_strict,
         );
 
         let retransmit_stage = RetransmitStage::new(

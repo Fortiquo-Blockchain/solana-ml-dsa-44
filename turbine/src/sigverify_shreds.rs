@@ -5,7 +5,7 @@ use {
     solana_ledger::{
         leader_schedule_cache::LeaderScheduleCache,
         shred,
-        sigverify_shreds::{audit_ml_dsa_shreds, verify_shreds_gpu},
+        sigverify_shreds::{audit_ml_dsa_shreds, enforce_ml_dsa_shreds, verify_shreds_gpu},
     },
     solana_perf::{self, deduper::Deduper, packet::PacketBatch, recycler_cache::RecyclerCache},
     solana_rayon_threadlimit::get_thread_count,
@@ -37,6 +37,9 @@ pub fn spawn_shred_sigverify(
     shred_fetch_receiver: Receiver<PacketBatch>,
     retransmit_sender: Sender<Vec</*shred:*/ Vec<u8>>>,
     verified_sender: Sender<Vec<PacketBatch>>,
+    // fork (Phase 3): --ml-dsa-shred-strict — drop ml_dsa shreds that fail the
+    // post-quantum verify (default false = advisory/non-gating).
+    ml_dsa_strict: bool,
 ) -> JoinHandle<()> {
     let recycler_cache = RecyclerCache::warmed();
     let mut stats = ShredSigVerifyStats::new(Instant::now());
@@ -64,6 +67,7 @@ pub fn spawn_shred_sigverify(
                 &shred_fetch_receiver,
                 &retransmit_sender,
                 &verified_sender,
+                ml_dsa_strict,
                 &mut stats,
             ) {
                 Ok(()) => (),
@@ -91,6 +95,7 @@ fn run_shred_sigverify<const K: usize>(
     shred_fetch_receiver: &Receiver<PacketBatch>,
     retransmit_sender: &Sender<Vec</*shred:*/ Vec<u8>>>,
     verified_sender: &Sender<Vec<PacketBatch>>,
+    ml_dsa_strict: bool,
     stats: &mut ShredSigVerifyStats,
 ) -> Result<(), Error> {
     const RECV_TIMEOUT: Duration = Duration::from_secs(1);
@@ -122,6 +127,7 @@ fn run_shred_sigverify<const K: usize>(
         bank_forks,
         leader_schedule_cache,
         recycler_cache,
+        ml_dsa_strict,
         &mut packets,
     );
     stats.num_discards_post += count_discards(&packets);
@@ -146,6 +152,9 @@ fn verify_packets(
     bank_forks: &RwLock<BankForks>,
     leader_schedule_cache: &LeaderScheduleCache,
     recycler_cache: &RecyclerCache,
+    // fork (Phase 3): when true (--ml-dsa-shred-strict), the post-quantum pass
+    // drops ml_dsa shreds that fail verification instead of only auditing them.
+    ml_dsa_strict: bool,
     packets: &mut [PacketBatch],
 ) {
     let working_bank = bank_forks.read().unwrap().working_bank();
@@ -157,11 +166,16 @@ fn verify_packets(
             .collect();
     let out = verify_shreds_gpu(thread_pool, packets, &leader_slots, recycler_cache);
     solana_perf::sigverify::mark_disabled(packets, &out);
-    // fork (Phase 3): non-gating post-quantum audit. Verifies any ML-DSA-44
-    // shreds against the same leader schedule and emits ok/fail telemetry,
-    // without affecting the Ed25519 liveness gate above. A no-op (one cheap
-    // variant-byte check per shred) when no ml_dsa shreds are present.
-    audit_ml_dsa_shreds(packets, &leader_slots);
+    // fork (Phase 3): post-quantum ML-DSA-44 pass against the same leader
+    // schedule. Default (advisory) only emits ok/fail telemetry and never touches
+    // the Ed25519 liveness gate above; strict mode additionally discards ml_dsa
+    // shreds that fail. A near no-op (one cheap variant-byte check per shred)
+    // when no ml_dsa shreds are present.
+    if ml_dsa_strict {
+        enforce_ml_dsa_shreds(packets, &leader_slots);
+    } else {
+        audit_ml_dsa_shreds(packets, &leader_slots);
+    }
 }
 
 // Returns pubkey of leaders for shred slots refrenced in the packets.
@@ -333,6 +347,7 @@ mod tests {
             &bank_forks,
             &leader_schedule_cache,
             &RecyclerCache::warmed(),
+            false, // ml_dsa_strict
             &mut batches,
         );
         assert!(!batches[0][0].meta().discard());

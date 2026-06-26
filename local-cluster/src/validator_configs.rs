@@ -71,6 +71,7 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         unified_scheduler_handler_threads: config.unified_scheduler_handler_threads,
         ml_dsa_voter: config.ml_dsa_voter.clone(),
         ml_dsa_shred: config.ml_dsa_shred.clone(),
+        ml_dsa_shred_strict: config.ml_dsa_shred_strict,
     }
 }
 

@@ -614,6 +614,12 @@ fn main() {
             ml_dsa_keypair.address()
         );
         genesis.ml_dsa_shred(Arc::new(ml_dsa_keypair));
+        // Phase 3: --ml-dsa-shred-strict makes turbine drop ml_dsa shreds that fail
+        // post-quantum verification (clap enforces it requires --ml-dsa-shred).
+        if matches.is_present("ml_dsa_shred_strict") {
+            println!("Post-quantum shred verification is STRICT: failing ML-DSA-44 shreds dropped");
+            genesis.ml_dsa_shred_strict(true);
+        }
     }
 
     match genesis.start_with_mint_address_and_geyser_plugin_rpc(

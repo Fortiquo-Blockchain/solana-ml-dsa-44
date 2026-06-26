@@ -2702,6 +2702,18 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                 ),
         )
         .arg(
+            Arg::with_name("ml_dsa_shred_strict")
+                .long("ml-dsa-shred-strict")
+                .takes_value(false)
+                .requires("ml_dsa_shred")
+                .help(
+                    "Phase 3 (post-quantum): turbine DROPS received ML-DSA-44 shreds that fail \
+                     post-quantum verification, instead of the default advisory (telemetry-only) \
+                     pass. Opt-in: omit it so an ml_dsa verification gap can never stall the node. \
+                     Requires --ml-dsa-shred.",
+                ),
+        )
+        .arg(
             Arg::with_name("faucet_sol")
                 .long("faucet-sol")
                 .takes_value(true)
