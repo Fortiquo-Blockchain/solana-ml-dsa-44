@@ -203,7 +203,6 @@ impl ShredData {
         ml_dsa: bool,
     ) -> Result<usize, Error> {
         debug_assert!(chained || !resigned);
-        debug_assert!(!(ml_dsa && resigned)); // fork: v1 does not ml_dsa-sign the resigned set
         Self::SIZE_OF_PAYLOAD
             .checked_sub(
                 Self::SIZE_OF_HEADERS
@@ -426,9 +425,8 @@ impl ShredCode {
         ml_dsa: bool,
     ) -> Result<usize, Error> {
         debug_assert!(chained || !resigned);
-        debug_assert!(!(ml_dsa && resigned)); // fork: v1 does not ml_dsa-sign the resigned set
-                                              // Merkle proof is generated and signed after coding shreds are
-                                              // generated. Coding shred headers cannot be erasure coded either.
+        // Merkle proof is generated and signed after coding shreds are
+        // generated. Coding shred headers cannot be erasure coded either.
         Self::SIZE_OF_PAYLOAD
             .checked_sub(
                 Self::SIZE_OF_HEADERS
@@ -1305,10 +1303,11 @@ pub(super) fn make_shreds_from_data(
     let chained = chained_merkle_root.is_some();
     let resigned = chained && is_last_in_slot;
     // fork (Phase 3): a post-quantum shred when an ML-DSA keypair is supplied.
-    // None => false => shred bytes are byte-identical to the Ed25519 path. v1
-    // never combines ml_dsa with resigned, so the slot's final (resigned) FEC
-    // set stays Ed25519-only.
-    let ml_dsa = ml_dsa_keypair.is_some() && !resigned;
+    // None => false => shred bytes are byte-identical to the Ed25519 path. The
+    // slot's final (resigned) FEC set is ml_dsa-signed too — the commitment sits
+    // before the proof and the trailer after it, ahead of the dormant resigned
+    // retransmitter slot at the very end (capacity reserves both).
+    let ml_dsa = ml_dsa_keypair.is_some();
     let erasure_batch_size =
         shredder::get_erasure_batch_size(DATA_SHREDS_PER_FEC_BLOCK, is_last_in_slot);
     let proof_size = get_proof_size(erasure_batch_size);
@@ -1525,10 +1524,10 @@ fn make_erasure_batch(
     let chained = chained_merkle_root.is_some();
     let resigned = chained && is_last_in_slot;
     // fork (Phase 3): a post-quantum shred when an ML-DSA keypair is supplied,
-    // except the resigned (final) FEC set which stays Ed25519-only in v1. Drop
-    // the keypair when disabled so the commitment/trailer signing below is
-    // skipped in lockstep with the ml_dsa variant flag.
-    let ml_dsa = ml_dsa_keypair.is_some() && !resigned;
+    // including the resigned (final) FEC set. Drop the keypair when disabled so
+    // the commitment/trailer signing below is skipped in lockstep with the
+    // ml_dsa variant flag.
+    let ml_dsa = ml_dsa_keypair.is_some();
     let ml_dsa_keypair = if ml_dsa { ml_dsa_keypair } else { None };
     let erasure_batch_size = shredder::get_erasure_batch_size(num_data_shreds, is_last_in_slot);
     let num_coding_shreds = erasure_batch_size - num_data_shreds;
@@ -1705,13 +1704,14 @@ mod test {
             - if ml_dsa { SIZE_OF_ML_DSA_OVERHEAD } else { 0 }
     }
 
-    // fork (Phase 3): the ml_dsa column exercises the post-quantum layout math.
-    // ml_dsa + resigned is an invalid combination (v1), so it is not tested.
+    // fork (Phase 3): the ml_dsa column exercises the post-quantum layout math,
+    // including ml_dsa + chained + resigned (the final FEC set is now signed).
     #[test_case(false, false, false)]
     #[test_case(true, false, false)]
     #[test_case(true, true, false)]
     #[test_case(false, false, true)]
     #[test_case(true, false, true)]
+    #[test_case(true, true, true)]
     fn test_shred_data_size_of_payload(chained: bool, resigned: bool, ml_dsa: bool) {
         for proof_size in 0..0x15 {
             assert_eq!(
@@ -1726,6 +1726,7 @@ mod test {
     #[test_case(true, true, false)]
     #[test_case(false, false, true)]
     #[test_case(true, false, true)]
+    #[test_case(true, true, true)]
     fn test_shred_data_capacity(chained: bool, resigned: bool, ml_dsa: bool) {
         for proof_size in 0..0x15 {
             assert_eq!(
@@ -1740,6 +1741,7 @@ mod test {
     #[test_case(true, true, false)]
     #[test_case(false, false, true)]
     #[test_case(true, false, true)]
+    #[test_case(true, true, true)]
     fn test_shred_code_capacity(chained: bool, resigned: bool, ml_dsa: bool) {
         for proof_size in 0..0x15 {
             assert_eq!(
@@ -2057,8 +2059,9 @@ mod test {
     // ml_dsa trailer MlDsaPublicKey::verify, payload round-trip) validate the
     // crypto; here we assert the ml_dsa variant, the unchanged Ed25519 liveness
     // path, and that the input data is still recoverable at reduced capacity.
-    // is_last_in_slot is false so the set is not resigned (ml_dsa requires
-    // !resigned). chained=false exercises 0xC0/0xE0, chained=true 0xD0/0xF0.
+    // is_last_in_slot is false, so this exercises the non-resigned ml_dsa sets:
+    // chained=false => 0xC0/0xE0, chained=true => 0xD0/0xF0. The resigned ml_dsa
+    // set (0x20/0x30) is covered by test_ml_dsa_resigned_set_is_also_ml_dsa.
     #[test_case(false)]
     #[test_case(true)]
     fn test_make_ml_dsa_shreds(chained: bool) {
@@ -2135,11 +2138,14 @@ mod test {
         );
     }
 
-    // fork (Phase 3): the resigned (final) FEC set must stay Ed25519-only even
-    // when an ML-DSA keypair is supplied (ml_dsa + resigned is invalid in v1).
-    // This must produce plain shreds and must NOT panic.
+    // fork (Phase 3): the resigned (final) FEC set is now also ML-DSA-signed when
+    // an ML-DSA keypair is supplied (ml_dsa + chained + resigned, encoded 0x20/
+    // 0x30). Each shred carries the unchanged Ed25519 signature plus the
+    // post-quantum trailer. The full read-side ml_dsa verify of a resigned shred
+    // is covered by sigverify_shreds::test_sigverify_shred_ml_dsa_cpu; the
+    // make_erasure_batch debug_asserts cover the sign-side round-trip.
     #[test]
-    fn test_ml_dsa_resigned_set_is_ed25519_only() {
+    fn test_ml_dsa_resigned_set_is_also_ml_dsa() {
         let mut rng = rand::thread_rng();
         let reed_solomon_cache = ReedSolomonCache::default();
         let thread_pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
@@ -2159,7 +2165,7 @@ mod test {
             slot - 1,
             rng.gen(),
             rng.gen_range(1..64),
-            true, // is_last_in_slot => resigned => ml_dsa disabled in v1
+            true, // is_last_in_slot => resigned (now still ml_dsa-signed)
             0,
             0,
             &reed_solomon_cache,
@@ -2173,18 +2179,20 @@ mod test {
                 matches!(
                     shred.common_header().shred_variant,
                     ShredVariant::MerkleData {
-                        ml_dsa: false,
+                        ml_dsa: true,
                         resigned: true,
                         ..
                     } | ShredVariant::MerkleCode {
-                        ml_dsa: false,
+                        ml_dsa: true,
                         resigned: true,
                         ..
                     }
                 ),
-                "resigned set must be Ed25519-only, got {:?}",
+                "resigned set must be ml_dsa-signed, got {:?}",
                 shred.common_header().shred_variant
             );
+            // The post-quantum trailer is present and the Ed25519 sig still verifies.
+            assert!(shred::layout::is_ml_dsa_shred(shred.payload()));
             assert!(shred.verify(&keypair.pubkey()));
         }
     }

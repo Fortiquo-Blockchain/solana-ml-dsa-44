@@ -608,14 +608,16 @@ mod tests {
         run_test_sigverify_shred_cpu(0xdead_c0de);
     }
 
-    // fork (Phase 3): build a single ml_dsa merkle data shred (Ed25519 leader =
-    // `keypair`, post-quantum signer = `ml_dsa_keypair`). is_last_in_slot=false
-    // keeps the set non-resigned so ml_dsa stays enabled.
+    // fork (Phase 3): build an ml_dsa merkle data shred (Ed25519 leader =
+    // `keypair`, post-quantum signer = `ml_dsa_keypair`). With is_last_in_slot
+    // the final FEC set is resigned (ml_dsa+chained+resigned, 0x30) and we return
+    // a shred from it; otherwise the set is non-resigned (0xC0/0xD0).
     fn make_ml_dsa_data_shred<R: Rng>(
         rng: &mut R,
         slot: Slot,
         keypair: &Keypair,
         ml_dsa_keypair: &MlDsaKeypair,
+        is_last_in_slot: bool,
     ) -> Shred {
         let reed_solomon_cache = ReedSolomonCache::default();
         let version = rng.gen();
@@ -628,7 +630,7 @@ mod tests {
                 keypair,
                 Some(ml_dsa_keypair),
                 &entries,
-                false,                     // is_last_in_slot
+                is_last_in_slot,
                 Some(chained_merkle_root), // chained_merkle_root
                 0,                         // next_shred_index
                 0,                         // next_code_index
@@ -636,7 +638,12 @@ mod tests {
                 &reed_solomon_cache,
                 &mut ProcessShredsStats::default(),
             );
-        let shred = data_shreds.into_iter().next().unwrap();
+        // The resigned (final) FEC set is the last one, so its shreds are last.
+        let shred = if is_last_in_slot {
+            data_shreds.into_iter().last().unwrap()
+        } else {
+            data_shreds.into_iter().next().unwrap()
+        };
         assert!(shred::layout::is_ml_dsa_shred(shred.payload()));
         shred
     }
@@ -654,7 +661,7 @@ mod tests {
         let slot = 0xdead_c0de;
         let keypair = Keypair::new();
         let ml_dsa_keypair = MlDsaKeypair::from_seed(&[3u8; 32]);
-        let shred = make_ml_dsa_data_shred(&mut rng, slot, &keypair, &ml_dsa_keypair);
+        let shred = make_ml_dsa_data_shred(&mut rng, slot, &keypair, &ml_dsa_keypair, false);
         let leader_slots = HashMap::from([(slot, keypair.pubkey())]);
 
         // Honest ml_dsa shred verifies post-quantum.
@@ -695,6 +702,29 @@ mod tests {
         forged.buffer_mut()[sig_start..sig_start + MlDsaKeypair::SIGNATURE_LENGTH]
             .copy_from_slice(&attacker_sig);
         assert!(!verify_shred_ml_dsa_cpu(&forged, &leader_slots));
+
+        // fork (Phase 3): a RESIGNED (final-FEC-set) ml_dsa shred also verifies.
+        // Its layout differs — the dormant 64-byte retransmitter slot sits AFTER
+        // the trailer at the very end of the payload — so this exercises
+        // get_ml_dsa_regions / verify_shred_ml_dsa_cpu against the resigned trailer
+        // offset (0x30 = MerkleData ml_dsa+chained+resigned).
+        let resigned = make_ml_dsa_data_shred(&mut rng, slot, &keypair, &ml_dsa_keypair, true);
+        // The shred-variant byte follows the 64-byte Ed25519 signature; high
+        // nibble 0x30 == MerkleData ml_dsa+chained+resigned.
+        assert_eq!(resigned.payload()[64] & 0xF0, 0x30);
+        assert!(verify_shred_ml_dsa_cpu(&to_packet(&resigned), &leader_slots));
+        // Wrong leader => Ed25519 check (a) fails on the resigned shred too.
+        assert!(!verify_shred_ml_dsa_cpu(
+            &to_packet(&resigned),
+            &HashMap::from([(slot, Keypair::new().pubkey())])
+        ));
+        // Tampering the ml_dsa signature's last byte — which sits just before the
+        // dormant 64-byte resigned slot, not at the payload end — fails check (c),
+        // confirming the trailer is read from before that slot.
+        let mut tampered_resigned = to_packet(&resigned);
+        let size = tampered_resigned.meta().size;
+        tampered_resigned.buffer_mut()[size - 64 - 1] ^= 0xff;
+        assert!(!verify_shred_ml_dsa_cpu(&tampered_resigned, &leader_slots));
 
         // A plain Ed25519 (non-ml_dsa) shred is ignored by the ml_dsa pass.
         let mut ed_shred = Shred::new_from_data(

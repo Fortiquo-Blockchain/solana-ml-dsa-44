@@ -204,31 +204,34 @@ enum ShredVariant {
     //   0b0100_????  MerkleCode
     //   0b0110_????  MerkleCode chained
     //   0b0111_????  MerkleCode chained resigned
-    //   0b1110_????  MerkleCode ml_dsa             (fork: Phase 3, post-quantum)
-    //   0b1111_????  MerkleCode ml_dsa chained     (fork: Phase 3, post-quantum)
+    //   0b1110_????  MerkleCode ml_dsa                  (fork: Phase 3, post-quantum)
+    //   0b1111_????  MerkleCode ml_dsa chained          (fork: Phase 3, post-quantum)
+    //   0b0010_????  MerkleCode ml_dsa chained resigned (fork: Phase 3, post-quantum)
     //   0b1000_????  MerkleData
     //   0b1001_????  MerkleData chained
     //   0b1011_????  MerkleData chained resigned
-    //   0b1100_????  MerkleData ml_dsa             (fork: Phase 3, post-quantum)
-    //   0b1101_????  MerkleData ml_dsa chained     (fork: Phase 3, post-quantum)
+    //   0b1100_????  MerkleData ml_dsa                  (fork: Phase 3, post-quantum)
+    //   0b1101_????  MerkleData ml_dsa chained          (fork: Phase 3, post-quantum)
+    //   0b0011_????  MerkleData ml_dsa chained resigned (fork: Phase 3, post-quantum)
     // fork (Phase 3): `ml_dsa` marks a shred that additionally carries a
     // post-quantum ML-DSA-44 signature + leader public key in a trailing region
     // (see merkle.rs). The Ed25519 signature at bytes 0..64 is unchanged, so
-    // ml_dsa shreds stay byte-compatible with the Ed25519 liveness path. v1 does
-    // not combine ml_dsa with `resigned` (the slot's final FEC set stays
-    // Ed25519-only post-quantum-wise).
+    // ml_dsa shreds stay byte-compatible with the Ed25519 liveness path. The
+    // slot's final (resigned) FEC set is also ml_dsa-signed; a resigned shred's
+    // dormant 64-byte retransmitter slot follows the ml_dsa trailer at the very
+    // end of the payload (the trailer stays immediately after the Merkle proof).
     MerkleCode {
         proof_size: u8,
         chained: bool,
         resigned: bool,
         ml_dsa: bool,
-    }, // 0b01??_???? / 0b111?_????
+    }, // 0b01??_???? / 0b111?_???? / 0b0010_????
     MerkleData {
         proof_size: u8,
         chained: bool,
         resigned: bool,
         ml_dsa: bool,
-    }, // 0b10??_???? / 0b110?_????
+    }, // 0b10??_???? / 0b110?_???? / 0b0011_????
 }
 
 /// A common header that is present in data and code shred headers
@@ -914,6 +917,13 @@ impl From<ShredVariant> for u8 {
                 resigned: false,
                 ml_dsa: true,
             } => proof_size | 0xf0,
+            // fork (Phase 3): the slot's final (resigned) FEC set is also ml_dsa.
+            ShredVariant::MerkleCode {
+                proof_size,
+                chained: true,
+                resigned: true,
+                ml_dsa: true,
+            } => proof_size | 0x20,
             ShredVariant::MerkleData {
                 proof_size,
                 chained: false,
@@ -945,8 +955,15 @@ impl From<ShredVariant> for u8 {
                 resigned: false,
                 ml_dsa: true,
             } => proof_size | 0xd0,
-            // Invalid combinations: resigned without chained, or ml_dsa with
-            // resigned (v1 does not post-quantum-sign the final resigned set).
+            // fork (Phase 3): the slot's final (resigned) FEC set is also ml_dsa.
+            ShredVariant::MerkleData {
+                proof_size,
+                chained: true,
+                resigned: true,
+                ml_dsa: true,
+            } => proof_size | 0x30,
+            // Invalid combination: resigned without chained (a resigned shred is
+            // always chained to the previous FEC set).
             ShredVariant::MerkleCode {
                 proof_size: _,
                 chained: false,
@@ -958,16 +975,6 @@ impl From<ShredVariant> for u8 {
                 chained: false,
                 resigned: true,
                 ml_dsa: _,
-            }
-            | ShredVariant::MerkleCode {
-                resigned: true,
-                ml_dsa: true,
-                ..
-            }
-            | ShredVariant::MerkleData {
-                resigned: true,
-                ml_dsa: true,
-                ..
             } => panic!("Invalid shred variant: {shred_variant:?}"),
         }
     }
@@ -1014,6 +1021,13 @@ impl TryFrom<u8> for ShredVariant {
                     resigned: false,
                     ml_dsa: true,
                 }),
+                // fork (Phase 3): ml_dsa + chained + resigned (final FEC set).
+                0x20 => Ok(ShredVariant::MerkleCode {
+                    proof_size,
+                    chained: true,
+                    resigned: true,
+                    ml_dsa: true,
+                }),
                 0x80 => Ok(ShredVariant::MerkleData {
                     proof_size,
                     chained: false,
@@ -1043,6 +1057,13 @@ impl TryFrom<u8> for ShredVariant {
                     proof_size,
                     chained: true,
                     resigned: false,
+                    ml_dsa: true,
+                }),
+                // fork (Phase 3): ml_dsa + chained + resigned (final FEC set).
+                0x30 => Ok(ShredVariant::MerkleData {
+                    proof_size,
+                    chained: true,
+                    resigned: true,
                     ml_dsa: true,
                 }),
                 _ => Err(Error::InvalidShredVariant),
@@ -1630,13 +1651,12 @@ mod tests {
         assert_matches!(bincode::deserialize::<ShredVariant>(&[0b0101_0000]), Err(_));
         assert_matches!(bincode::deserialize::<ShredVariant>(&[0b1010_0000]), Err(_));
         // fork (Phase 3): the ml_dsa change consumed high nibbles 0xC0/0xD0
-        // (data) and 0xE0/0xF0 (code) — now valid (see test_shred_variant_compat_*).
-        // The remaining low high-nibbles stay invalid; pin that so a future remap
-        // is intentional rather than accidental.
+        // (data), 0xE0/0xF0 (code), and 0x20/0x30 (ml_dsa+chained+resigned code/
+        // data) — all now valid (see test_shred_variant_compat_*). The remaining
+        // low high-nibble 0x10 stays invalid; pin that so a future remap is
+        // intentional rather than accidental.
         assert_matches!(ShredVariant::try_from(0b0001_0000), Err(_)); // 0x10
-        assert_matches!(ShredVariant::try_from(0b0010_0000), Err(_)); // 0x20
-        assert_matches!(ShredVariant::try_from(0b0011_0000), Err(_)); // 0x30
-                                                                      // Legacy coding shred.
+        // Legacy coding shred.
         assert_eq!(u8::from(ShredVariant::LegacyCode), 0b0101_1010);
         assert_eq!(ShredType::from(ShredVariant::LegacyCode), ShredType::Code);
         assert_matches!(
@@ -1664,13 +1684,14 @@ mod tests {
         );
     }
 
-    // fork (Phase 3): the ml_dsa rows (0xe0/0xf0) exercise the post-quantum
-    // code-shred nibble encoding. ml_dsa + resigned is invalid, so untested.
+    // fork (Phase 3): the ml_dsa rows (0xe0/0xf0/0x20) exercise the post-quantum
+    // code-shred nibble encoding, including ml_dsa + chained + resigned (0x20).
     #[test_case(false, false, false, 0b0100_0000)]
     #[test_case(true, false, false, 0b0110_0000)]
     #[test_case(true, true, false, 0b0111_0000)]
     #[test_case(false, false, true, 0b1110_0000)]
     #[test_case(true, false, true, 0b1111_0000)]
+    #[test_case(true, true, true, 0b0010_0000)]
     fn test_shred_variant_compat_merkle_code(
         chained: bool,
         resigned: bool,
@@ -1726,13 +1747,14 @@ mod tests {
         }
     }
 
-    // fork (Phase 3): the ml_dsa rows (0xc0/0xd0) exercise the post-quantum
-    // data-shred nibble encoding. ml_dsa + resigned is invalid, so untested.
+    // fork (Phase 3): the ml_dsa rows (0xc0/0xd0/0x30) exercise the post-quantum
+    // data-shred nibble encoding, including ml_dsa + chained + resigned (0x30).
     #[test_case(false, false, false, 0b1000_0000)]
     #[test_case(true, false, false, 0b1001_0000)]
     #[test_case(true, true, false, 0b1011_0000)]
     #[test_case(false, false, true, 0b1100_0000)]
     #[test_case(true, false, true, 0b1101_0000)]
+    #[test_case(true, true, true, 0b0011_0000)]
     fn test_shred_variant_compat_merkle_data(
         chained: bool,
         resigned: bool,
@@ -1788,29 +1810,29 @@ mod tests {
         }
     }
 
-    // fork (Phase 3): the ml_dsa + resigned combination is invalid in v1 (the
-    // slot's final resigned FEC set stays Ed25519-only). Encoding it must panic
-    // loudly rather than silently emit a stray byte, mirroring the existing
-    // `resigned && !chained` invalid combo.
+    // fork (Phase 3): ml_dsa + chained + resigned is now valid (the slot's final
+    // FEC set is post-quantum-signed, encoded 0x30/0x20 — see the compat tests
+    // above). The still-invalid combo is resigned-without-chained, which must
+    // panic loudly rather than emit a stray byte.
     #[test]
     #[should_panic(expected = "Invalid shred variant")]
-    fn test_ml_dsa_resigned_data_variant_panics() {
+    fn test_resigned_without_chained_data_variant_panics() {
         let _ = u8::from(ShredVariant::MerkleData {
             proof_size: 0,
-            chained: true,
+            chained: false,
             resigned: true,
-            ml_dsa: true,
+            ml_dsa: false,
         });
     }
 
     #[test]
     #[should_panic(expected = "Invalid shred variant")]
-    fn test_ml_dsa_resigned_code_variant_panics() {
+    fn test_resigned_without_chained_code_variant_panics() {
         let _ = u8::from(ShredVariant::MerkleCode {
             proof_size: 0,
-            chained: true,
+            chained: false,
             resigned: true,
-            ml_dsa: true,
+            ml_dsa: false,
         });
     }
 
