@@ -587,6 +587,35 @@ fn main() {
         genesis.ml_dsa_voter(Arc::new(ml_dsa_keypair));
     }
 
+    // Phase 3 (post-quantum): --ml-dsa-shred <KEYFILE> additionally signs broadcast shreds
+    // with ML-DSA-44. The keyfile is loaded if it exists, otherwise a new keypair is minted.
+    if let Some(ml_dsa_shred_keyfile) = matches.value_of("ml_dsa_shred") {
+        let ml_dsa_keypair = if Path::new(ml_dsa_shred_keyfile).exists() {
+            read_ml_dsa_keypair_file(ml_dsa_shred_keyfile).unwrap_or_else(|err| {
+                println!("Error: failed to read ML-DSA keypair file {ml_dsa_shred_keyfile}: {err}");
+                exit(1);
+            })
+        } else {
+            let kp = MlDsaKeypair::new().unwrap_or_else(|err| {
+                println!("Error: failed to generate ML-DSA keypair: {err}");
+                exit(1);
+            });
+            write_ml_dsa_keypair_file(&kp, ml_dsa_shred_keyfile).unwrap_or_else(|err| {
+                println!(
+                    "Error: failed to write ML-DSA keypair file {ml_dsa_shred_keyfile}: {err}"
+                );
+                exit(1);
+            });
+            println!("Generated new ML-DSA-44 shred keypair at {ml_dsa_shred_keyfile}");
+            kp
+        };
+        println!(
+            "Post-quantum shred signing enabled (ML-DSA-44); shred-signer address: {}",
+            ml_dsa_keypair.address()
+        );
+        genesis.ml_dsa_shred(Arc::new(ml_dsa_keypair));
+    }
+
     match genesis.start_with_mint_address_and_geyser_plugin_rpc(
         mint_address,
         socket_addr_space,

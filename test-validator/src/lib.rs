@@ -142,6 +142,9 @@ pub struct TestValidatorGenesis {
     /// Phase 2: when set, the genesis vote account's authorized_voter is this key's
     /// (Ed25519-shaped) address and consensus votes are signed with ML-DSA-44.
     pub ml_dsa_voter: Option<Arc<MlDsaKeypair>>,
+    /// Phase 3: when set, this validator additionally signs each FEC-set Merkle root with
+    /// this ML-DSA-44 key (post-quantum) when broadcasting shreds as leader.
+    pub ml_dsa_shred: Option<Arc<MlDsaKeypair>>,
     pub staked_nodes_overrides: Arc<RwLock<HashMap<Pubkey, u64>>>,
     pub max_ledger_shreds: Option<u64>,
     pub max_genesis_archive_unpacked_size: Option<u64>,
@@ -177,6 +180,7 @@ impl Default for TestValidatorGenesis {
             start_progress: Arc::<RwLock<ValidatorStartProgress>>::default(),
             authorized_voter_keypairs: Arc::<RwLock<Vec<Arc<Keypair>>>>::default(),
             ml_dsa_voter: None,
+            ml_dsa_shred: None,
             staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
             max_ledger_shreds: Option::<u64>::default(),
             max_genesis_archive_unpacked_size: Option::<u64>::default(),
@@ -216,6 +220,13 @@ impl TestValidatorGenesis {
     /// key's address and that address is funded to pay vote-tx fees.
     pub fn ml_dsa_voter(&mut self, ml_dsa_voter: Arc<MlDsaKeypair>) -> &mut Self {
         self.ml_dsa_voter = Some(ml_dsa_voter);
+        self
+    }
+
+    /// Phase 3: sign this validator's broadcast shreds with ML-DSA-44 (post-quantum)
+    /// in addition to Ed25519, so upgraded peers can post-quantum-verify its blocks.
+    pub fn ml_dsa_shred(&mut self, ml_dsa_shred: Arc<MlDsaKeypair>) -> &mut Self {
+        self.ml_dsa_shred = Some(ml_dsa_shred);
         self
     }
 
@@ -1026,6 +1037,9 @@ impl TestValidator {
         // Phase 2: thread the ML-DSA voter key into the validator so ReplayStage signs
         // votes with it (None = unchanged Ed25519 voting).
         validator_config.ml_dsa_voter = config.ml_dsa_voter.clone();
+        // Phase 3: thread the ML-DSA shred key into the validator so the broadcast stage
+        // post-quantum-signs shreds as leader (None = unchanged Ed25519 broadcasting).
+        validator_config.ml_dsa_shred = config.ml_dsa_shred.clone();
 
         // Phase 2: ML-DSA votes are submitted as raw 0x00 UDP packets to the node's own
         // regular TPU (they cannot ride gossip CRDS or the vote-only port). The regular TPU

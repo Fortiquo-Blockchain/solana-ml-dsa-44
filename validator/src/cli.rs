@@ -2688,6 +2688,20 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                 ),
         )
         .arg(
+            Arg::with_name("ml_dsa_shred")
+                .long("ml-dsa-shred")
+                .value_name("KEYFILE")
+                .takes_value(true)
+                .help(
+                    "Phase 3 (post-quantum): additionally sign this validator's broadcast \
+                     shreds with the ML-DSA-44 key at KEYFILE, on top of the unchanged Ed25519 \
+                     signature. If KEYFILE does not exist, a new ML-DSA-44 keypair is generated \
+                     and written there. Upgraded peers post-quantum-verify the leader's blocks; \
+                     the Ed25519 path still gates liveness. Note: ml_dsa shreds roughly double \
+                     shred volume. Omit this flag for unchanged Ed25519 broadcasting.",
+                ),
+        )
+        .arg(
             Arg::with_name("faucet_sol")
                 .long("faucet-sol")
                 .takes_value(true)

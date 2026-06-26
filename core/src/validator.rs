@@ -272,6 +272,10 @@ pub struct ValidatorConfig {
     /// Phase 2: when set, consensus votes are signed with this ML-DSA-44 key (post-quantum)
     /// instead of Ed25519. `None` = byte-for-byte unchanged Ed25519 voting.
     pub ml_dsa_voter: Option<Arc<MlDsaKeypair>>,
+    /// Phase 3: when set, this leader additionally signs each FEC-set Merkle root with this
+    /// ML-DSA-44 key (post-quantum), carried in a per-shred trailer. `None` = unchanged
+    /// Ed25519-only shred broadcasting.
+    pub ml_dsa_shred: Option<Arc<MlDsaKeypair>>,
 }
 
 impl Default for ValidatorConfig {
@@ -341,6 +345,7 @@ impl Default for ValidatorConfig {
             wen_restart_proto_path: None,
             unified_scheduler_handler_threads: None,
             ml_dsa_voter: None,
+            ml_dsa_shred: None,
         }
     }
 }
@@ -1380,6 +1385,7 @@ impl Validator {
             &connection_cache,
             turbine_quic_endpoint_sender,
             &identity_keypair,
+            config.ml_dsa_shred.clone(),
             config.runtime_config.log_messages_bytes_limit,
             &staked_nodes,
             config.staked_nodes_overrides.clone(),
