@@ -54,10 +54,12 @@ const_assert_eq!(ShredData::SIZE_OF_PAYLOAD, 8163);
 //   * a TRAILER = [ml_dsa pubkey (1312) || ml_dsa signature (2420)] appended
 //     after the Merkle proof, excluded from the signed Merkle node. Carried on
 //     transmitted shreds; absent on erasure-recovered shreds.
-// v1 does NOT reconstruct the commitment during erasure recovery, so an
-// incomplete ml_dsa FEC set fails RS-recovery and falls back to repair (rather
-// than re-deriving the commitment like the chained root). Fine for single-node
-// (no loss) and acceptable multi-node (repair backstops it).
+// Erasure recovery reconstructs the commitment by reading it from a surviving
+// shred and restoring it onto recovered shreds (mirroring the chained Merkle
+// root), so an incomplete ml_dsa FEC set recovers cleanly. The trailer is not
+// erasure-coded, so recovered shreds carry a valid Ed25519 signature but lack
+// the ml_dsa trailer — fine, since the advisory ml_dsa audit only runs on
+// received turbine shreds, never on locally-recovered ones.
 const_assert_eq!(SIZE_OF_ML_DSA_PUBKEY, 1312);
 const SIZE_OF_ML_DSA_PUBKEY: usize = MlDsaKeypair::PUBLIC_KEY_LENGTH;
 const_assert_eq!(SIZE_OF_ML_DSA_SIGNATURE, 2420);
@@ -285,6 +287,11 @@ impl ShredData {
     fn from_recovered_shard(
         signature: &Signature,
         chained_merkle_root: &Option<Hash>,
+        // fork (Phase 3): the shared ml_dsa commitment of the FEC set, read from a
+        // surviving shred. Restored on the recovered shred so its Merkle node
+        // matches the survivors (the commitment lives in the signed region, like
+        // the chained root, and is not part of the erasure-coded shard).
+        ml_dsa_commitment: &Option<Hash>,
         mut shard: Vec<u8>,
     ) -> Result<Self, Error> {
         let shard_size = shard.len();
@@ -317,6 +324,9 @@ impl ShredData {
         };
         if let Some(chained_merkle_root) = chained_merkle_root {
             shred.set_chained_merkle_root(chained_merkle_root)?;
+        }
+        if let Some(ml_dsa_commitment) = ml_dsa_commitment {
+            shred.set_ml_dsa_commitment(&ml_dsa_commitment.to_bytes())?;
         }
         shred.sanitize()?;
         Ok(shred)
@@ -478,6 +488,26 @@ impl ShredCode {
             .ok_or(Error::InvalidPayloadSize(self.payload.len()))
     }
 
+    // fork (Phase 3): read the shared ml_dsa commitment (sha256 of the leader's
+    // ml_dsa public key) out of the signed Merkle region, mirroring
+    // chained_merkle_root(). The commitment is a single value shared by every
+    // shred of the FEC set; erasure recovery reads it from a surviving shred and
+    // restores it on recovered shreds so their Merkle node matches the survivors.
+    // Errs for a non-ml_dsa shred.
+    fn ml_dsa_commitment(&self) -> Result<Hash, Error> {
+        let ShredVariant::MerkleCode { ml_dsa: true, .. } = self.common_header.shred_variant else {
+            return Err(Error::InvalidShredVariant);
+        };
+        let proof_offset = self.proof_offset()?;
+        let start = proof_offset
+            .checked_sub(SIZE_OF_ML_DSA_COMMITMENT)
+            .ok_or(Error::InvalidPayloadSize(self.payload.len()))?;
+        self.payload
+            .get(start..proof_offset)
+            .map(Hash::new)
+            .ok_or(Error::InvalidPayloadSize(self.payload.len()))
+    }
+
     fn set_chained_merkle_root(&mut self, chained_merkle_root: &Hash) -> Result<(), Error> {
         let offset = self.chained_merkle_root_offset()?;
         let Some(buffer) = self.payload.get_mut(offset..offset + SIZE_OF_MERKLE_ROOT) else {
@@ -511,6 +541,9 @@ impl ShredCode {
         common_header: ShredCommonHeader,
         coding_header: CodingShredHeader,
         chained_merkle_root: &Option<Hash>,
+        // fork (Phase 3): see ShredData::from_recovered_shard — the shared ml_dsa
+        // commitment, restored so the recovered shred's Merkle node matches.
+        ml_dsa_commitment: &Option<Hash>,
         mut shard: Vec<u8>,
     ) -> Result<Self, Error> {
         let ShredVariant::MerkleCode {
@@ -541,6 +574,9 @@ impl ShredCode {
         };
         if let Some(chained_merkle_root) = chained_merkle_root {
             shred.set_chained_merkle_root(chained_merkle_root)?;
+        }
+        if let Some(ml_dsa_commitment) = ml_dsa_commitment {
+            shred.set_ml_dsa_commitment(&ml_dsa_commitment.to_bytes())?;
         }
         shred.sanitize()?;
         Ok(shred)
@@ -1015,13 +1051,20 @@ pub(super) fn recover(
     reed_solomon_cache: &ReedSolomonCache,
 ) -> Result<Vec<Shred>, Error> {
     // Grab {common, coding} headers from first coding shred.
-    let (common_header, coding_header, chained_merkle_root) = shreds
+    let (common_header, coding_header, chained_merkle_root, ml_dsa_commitment) = shreds
         .iter()
         .find_map(|shred| {
             let Shred::ShredCode(shred) = shred else {
                 return None;
             };
             let chained_merkle_root = shred.chained_merkle_root().ok();
+            // fork (Phase 3): the shared ml_dsa commitment (None for a non-ml_dsa
+            // set). Restored on recovered shreds below so their Merkle node — which
+            // hashes the commitment — matches the survivors and recovery succeeds.
+            // Dropping the Err here is safe: a missing/wrong commitment diverges
+            // the recomputed root and is re-caught by the Merkle-proof check below
+            // (Err(InvalidMerkleProof)), the same fail-closed → repair outcome.
+            let ml_dsa_commitment = shred.ml_dsa_commitment().ok();
             let position = u32::from(shred.coding_header.position);
             let common_header = ShredCommonHeader {
                 index: shred.common_header.index.checked_sub(position)?,
@@ -1031,7 +1074,12 @@ pub(super) fn recover(
                 position: 0u16,
                 ..shred.coding_header
             };
-            Some((common_header, coding_header, chained_merkle_root))
+            Some((
+                common_header,
+                coding_header,
+                chained_merkle_root,
+                ml_dsa_commitment,
+            ))
         })
         .ok_or(TooFewParityShards)?;
     debug_assert_matches!(common_header.shred_variant, ShredVariant::MerkleCode { .. });
@@ -1126,6 +1174,7 @@ pub(super) fn recover(
                 let shred = ShredData::from_recovered_shard(
                     &common_header.signature,
                     &chained_merkle_root,
+                    &ml_dsa_commitment,
                     shard,
                 )?;
                 let ShredCommonHeader {
@@ -1164,6 +1213,7 @@ pub(super) fn recover(
                     common_header,
                     coding_header,
                     &chained_merkle_root,
+                    &ml_dsa_commitment,
                     shard,
                 )?;
                 Ok(Shred::ShredCode(shred))
@@ -2139,17 +2189,28 @@ mod test {
         }
     }
 
-    // fork (Phase 3): v1 does not reconstruct the ml_dsa commitment during
-    // erasure recovery (the commitment is shared FEC-set state, not part of the
-    // erasure-coded shard). Recovering a partial ml_dsa set must therefore fail
-    // cleanly — Err, never a panic — so the caller falls back to repair.
-    #[test]
-    fn test_recover_ml_dsa_set_fails_cleanly() {
+    // fork (Phase 3): an incomplete ml_dsa FEC set now recovers cleanly. Erasure
+    // recovery restores the shared 32-byte commitment (read from a surviving
+    // shred) onto the recovered shreds — exactly like the chained Merkle root —
+    // so their Merkle node matches the survivors and the recovered shreds carry a
+    // valid Ed25519 signature over the recomputed root (the liveness gate). The
+    // ml_dsa trailer is not erasure-coded, so recovered shreds simply lack it.
+    //
+    // The matrix exercises both reconstruction branches (drop a data shred =>
+    // ShredData::from_recovered_shard; drop a coding shred =>
+    // ShredCode::from_recovered_shard) across unchained and chained sets (chained
+    // restores both the chained root and the commitment, at adjacent offsets).
+    #[test_case(false, false; "unchained_drop_data")]
+    #[test_case(false, true; "unchained_drop_coding")]
+    #[test_case(true, false; "chained_drop_data")]
+    #[test_case(true, true; "chained_drop_coding")]
+    fn test_recover_ml_dsa_set_succeeds(chained: bool, drop_coding: bool) {
         let mut rng = rand::thread_rng();
         let reed_solomon_cache = ReedSolomonCache::default();
         let thread_pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
         let keypair = Keypair::new();
         let ml_dsa_keypair = MlDsaKeypair::from_seed(&[9u8; 32]);
+        let chained_merkle_root = chained.then(|| Hash::new_from_array(rng.gen()));
         let slot = 149_745_689;
         let mut data = vec![0u8; 5_000];
         rng.fill(&mut data[..]);
@@ -2157,30 +2218,47 @@ mod test {
             &thread_pool,
             &keypair,
             Some(&ml_dsa_keypair),
-            None, // not chained
+            chained_merkle_root,
             &data[..],
             slot,
             slot - 1,
             rng.gen(),
             rng.gen_range(1..64),
-            false, // is_last_in_slot
+            false, // is_last_in_slot (=> not resigned, ml_dsa stays enabled)
             0,
             0,
             &reed_solomon_cache,
             &mut ProcessShredsStats::default(),
         )
         .unwrap();
-        // Take one FEC set (data + coding shreds) and drop a single data shred,
-        // then attempt recovery. RS can reconstruct the data buffer, but the
-        // recovered shred has a zeroed commitment, so its Merkle node diverges
-        // and recovery must reject the set rather than emit a malformed shred.
+        // Take one FEC set (data + coding shreds) and drop a single shred. RS
+        // reconstructs the shard and recovery restores the commitment, so the
+        // recovered shred verifies against the leader's Ed25519 key.
         let mut fec_set: Vec<Shred> = batches.into_iter().next().unwrap();
-        let first_data = fec_set
+        let pos = fec_set
             .iter()
-            .position(|shred| matches!(shred, Shred::ShredData(_)))
+            .position(|shred| matches!(shred, Shred::ShredCode(_)) == drop_coding)
             .unwrap();
-        fec_set.remove(first_data);
-        assert_matches!(recover(fec_set, &reed_solomon_cache), Err(_));
+        let removed = fec_set.remove(pos);
+        let removed_is_coding = matches!(removed, Shred::ShredCode(_));
+        let recovered = recover(fec_set, &reed_solomon_cache).unwrap();
+        assert!(!recovered.is_empty());
+        // Every recovered shred is an ml_dsa variant whose Ed25519 signature over
+        // the recomputed Merkle root verifies — a zeroed commitment would diverge
+        // the root and fail here.
+        for shred in &recovered {
+            assert!(matches!(
+                shred.common_header().shred_variant,
+                ShredVariant::MerkleData { ml_dsa: true, .. }
+                    | ShredVariant::MerkleCode { ml_dsa: true, .. }
+            ));
+            assert!(shred.verify(&keypair.pubkey()));
+        }
+        // The dropped shred is among the recovered ones (same type and index).
+        assert!(recovered.iter().any(|shred| {
+            matches!(shred, Shred::ShredCode(_)) == removed_is_coding
+                && shred.index() == removed.index()
+        }));
     }
 
     fn run_make_shreds_from_data<R: Rng>(
