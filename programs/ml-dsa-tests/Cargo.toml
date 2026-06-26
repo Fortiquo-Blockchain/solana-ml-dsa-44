@@ -15,6 +15,7 @@ bincode = { workspace = true }
 fips204 = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }
+solana-ledger = { path = "../../ledger", version = "=2.0.0" }
 solana-program-test = { workspace = true }
 solana-rpc-client = { path = "../../rpc-client", version = "=2.0.0" }
 solana-rpc-client-api = { path = "../../rpc-client-api", version = "=2.0.0" }

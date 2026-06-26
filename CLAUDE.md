@@ -144,14 +144,32 @@ cargo test -p solana-gossip --test gossip crds_value   # CrdsSignature verify/bi
 cargo test -p solana-gossip --test gossip ml_dsa_crds_value_propagates_between_live_nodes  # live 2-node propagation + verify
 ```
 
+## Post-quantum block broadcasting (Phase 3) — done & verified
+Building on the SDK ML-DSA types, **a leader's block shreds can now carry a post-quantum ML-DSA-44 signature** — the fifth and final signing surface (block broadcasting / turbine). **Additive & flag-gated**: default off = byte-for-byte unchanged Ed25519 shreds (the node never stalls); on (`--ml-dsa-shred`) = each FEC-set Merkle root is *also* signed with ML-DSA-44, verified by upgraded peers. The node identity stays Ed25519 (flip deferred — see caveats).
+
+- **Why additive, not a cutover:** a 2420-byte ML-DSA signature dwarfs a shred's 64-byte signature field, and turbine fans *individual* shreds to *different* peers, so each shred must verify standalone. The existing Merkle scheme already signs **once per FEC set** over a 32-byte Merkle root and copies that signature into all ~67 shreds; Phase 3 keeps that model and makes the *carried* signature ML-DSA-sized. Ed25519 stays the load-bearing liveness signature; ML-DSA is an additional attestation.
+- **Wire format** (`ledger/src/shred.rs`, `ledger/src/shred/merkle.rs`): a new `ml_dsa: bool` on `ShredVariant::{MerkleData,MerkleCode}` (fresh high nibbles `0xC0/0xD0` data, `0xE0/0xF0` code; `ml_dsa+resigned` is invalid). An ml_dsa shred reserves, out of data *capacity* (packet size unchanged at 8192), a **32-byte commitment** = `sha256(leader ML-DSA pubkey)` inside the Ed25519-signed Merkle region (right before the proof), plus a **3732-byte trailer** = `[ML-DSA pubkey 1312 ‖ signature 2420]` after the proof (excluded from the signed node). Cost: ~47% data-capacity drop ⇒ ~2× shred count when on.
+- **Signing** (`merkle.rs` `make_erasure_batch`): before the Merkle tree is built, the commitment is written into every shred; the Ed25519 root signature is unchanged; then the root is signed **once** with ML-DSA-44 and the `[pubkey‖sig]` trailer is attached to every shred. The slot's final (`resigned`) FEC set stays Ed25519-only in v1 (`ml_dsa = keypair.is_some() && !resigned`). The keypair threads `Shredder::entries_to_shreds(…, ml_dsa_keypair: Option<&MlDsaKeypair>, …)` → `make_merkle_shreds_from_entries` → `make_shreds_from_data` → `make_erasure_batch`.
+- **Verification** (`ledger/src/sigverify_shreds.rs`): `verify_shred_ml_dsa_cpu` does a three-step check — (a) the Ed25519 signature authenticates the Merkle root against the slot leader, (b) `ml_dsa_address(trailer_pubkey) == the in-root commitment` (binds the trailer key to the leader — this stops an attacker swapping the unsigned trailer), and (c) the ML-DSA-44 signature over the root verifies. `audit_ml_dsa_shreds` runs this as a **non-gating** pass at turbine ingress (`turbine/src/sigverify_shreds.rs`, after the Ed25519 `mark_disabled`), emitting `ml_dsa_shred_verify_ok/_fail` metrics without ever discarding a shred. The GPU path is untouched (ml_dsa shreds keep a valid Ed25519 sig at bytes 0..64).
+- **Flag** (`--ml-dsa-shred <KEYFILE>`): `ValidatorConfig.ml_dsa_shred: Option<Arc<MlDsaKeypair>>` threads through `Tpu::new` → `new_broadcast_stage` → `StandardBroadcastRun` (a field) into both `entries_to_shreds` calls. `solana-test-validator` loads or mints the keypair; `TestValidatorGenesis::ml_dsa_shred(...)` is the builder. Mirrors the Phase 2 `--ml-dsa-vote` plumbing, routed to broadcast.
+- **⚠️ Caveats (Phase-3 PoC):** node identity stays Ed25519 — the QUIC/TLS handshake authenticates a node by an **Ed25519-keyed X.509 cert** (`streamer/src/tls_certificates.rs`); an ML-DSA address has no Ed25519 secret, so flipping `id()` would partition the node from turbine/repair (deferred, and still what blocks a node's own ML-DSA *gossip* identity). ml_dsa verification is **advisory** (telemetry, not a liveness gate) in v1. A single node's *own* shreds bypass turbine sigverify (that path verifies peer shreds), so on one node the audit counter does not climb — verify a produced shred offline instead (the demo does this). Erasure-recovery of an incomplete ml_dsa FEC set **falls back to repair** (recovered shreds lack the commitment); fine single-node, repair-backstopped multi-node. Same Phase-1 CPU-sigverify family; ~2× shred volume when on.
+
+Test it:
+```bash
+cargo test -p solana-ledger --lib shred::merkle      # ml_dsa signing round-trip (chained+unchained, multi-FEC), resigned stays Ed25519, partial recovery fails cleanly
+cargo test -p solana-ledger --lib sigverify_shreds   # verify pass: honest, wrong leader, tampered sig, forged trailer (commitment binding) + Ed25519 regression
+bash programs/ml-dsa-tests/demo-shred.sh             # live: a --ml-dsa-shred validator produces blocks; a produced shred's ML-DSA-44 trailer verifies offline
+```
+
 ## Running the demos — combined script vs. two terminals
-All three live demos (`programs/ml-dsa-tests/demo.sh` Phase 0, `demo-transfer.sh` Phase 1, `demo-vote.sh` Phase 2) print the full keys/signatures and the **raw JSON-RPC request + response at every chain interaction** (so nothing is faked). Run any of them **two ways** from a WSL shell (bash only):
+The live demos (`programs/ml-dsa-tests/demo.sh` Phase 0, `demo-transfer.sh` Phase 1, `demo-vote.sh` Phase 2, `demo-shred.sh` Phase 3) print the full keys/signatures and the **raw JSON-RPC request + response at every chain interaction** (so nothing is faked). Run any of them **two ways** from a WSL shell (bash only):
 
 **A) One combined script** — boots a throwaway validator, runs the demo, tears it down:
 ```bash
 bash programs/ml-dsa-tests/demo.sh           # Phase 0 — precompile verifies a PQ signature
 bash programs/ml-dsa-tests/demo-transfer.sh  # Phase 1 — a PQ-signed SOL transfer
 bash programs/ml-dsa-tests/demo-vote.sh      # Phase 2 — the validator's own votes are PQ
+bash programs/ml-dsa-tests/demo-shred.sh     # Phase 3 — the validator's own block shreds are PQ-signed
 ```
 Pass `--build` after editing Rust to force cargo (otherwise it skips cargo when the binaries exist; only changed crates recompile). `--build` on the Phase 1/2 scripts rebuilds `solana-test-validator` → recompiles `solana-core`; to iterate on just an example, run `cargo build --release --example <name>` and then the script **without** `--build`.
 

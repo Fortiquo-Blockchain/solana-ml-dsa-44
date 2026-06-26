@@ -2,7 +2,8 @@
 
 > **Status:** Phases 0–2a delivered & verified (app-level feature + post-quantum
 > user payments + post-quantum validator votes); Phase 2b (gossip CRDS signing)
-> core delivered & verified · Phase 3 (block broadcasting) planned ·
+> core delivered & verified · **Phase 3 (block broadcasting / shreds) delivered &
+> verified** (additive ML-DSA-44 shred signing + verify, flag-gated `--ml-dsa-shred`) ·
 > **Date:** 2026-06-09 **In one line:** replace the validator's signature
 > algorithm with a quantum-resistant one — feasible on our own network, not on
 > live Solana.
@@ -299,9 +300,13 @@ finalizing blocks (Phase 2).
 ---
 
 _Phases 0–2a (the app-level precompile, post-quantum transaction signing for
-user payments, and post-quantum validator votes) plus the Phase 2b gossip core
-(ML-DSA-signable CRDS values, verified between two live nodes) have been built and
-verified end-to-end; the engineering details live in the repo's `CLAUDE.md`
-("Post-quantum signatures" + "Phase 1" + "Phase 2" + "Phase 2b" sections). Next
-up: Phase 3 (block broadcasting / shreds), which also unblocks a node signing its
-own gossip identity with ML-DSA._
+user payments, and post-quantum validator votes), the Phase 2b gossip core
+(ML-DSA-signable CRDS values, verified between two live nodes), and Phase 3
+(block broadcasting / shreds — additive ML-DSA-44 shred signing + a non-gating
+verify pass, flag-gated via `--ml-dsa-shred`) have been built and verified
+end-to-end; the engineering details live in the repo's `CLAUDE.md`
+("Post-quantum signatures" + "Phase 1" + "Phase 2" + "Phase 2b" + "Phase 3"
+sections). Next up: Phase 4 — flip the node identity to the ML-DSA address
+(blocked today by the QUIC/TLS Ed25519 cert wall + the fixed-width Ping/Pong/
+PruneData signatures), which also unblocks a node signing its own gossip
+identity with ML-DSA._
