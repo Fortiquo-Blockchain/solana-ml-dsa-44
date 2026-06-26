@@ -4,7 +4,7 @@ use {
     itertools::{izip, Itertools},
     rayon::{prelude::*, ThreadPool},
     sha2::{Digest, Sha512},
-    solana_metrics::inc_new_counter_debug,
+    solana_metrics::{inc_new_counter_debug, inc_new_counter_info, inc_new_counter_warn},
     solana_perf::{
         cuda_runtime::PinnedVec,
         packet::{Packet, PacketBatch},
@@ -15,6 +15,8 @@ use {
     solana_sdk::{
         clock::Slot,
         hash::Hash,
+        ml_dsa_keypair::{ml_dsa_address, MlDsaKeypair},
+        ml_dsa_public_key::MlDsaPublicKey,
         pubkey::Pubkey,
         signature::{Keypair, Signature, Signer},
     },
@@ -46,6 +48,100 @@ pub fn verify_shred_cpu(packet: &Packet, slot_leaders: &HashMap<Slot, Pubkey>) -
         return false;
     };
     signature.verify(pubkey.as_ref(), data.as_ref())
+}
+
+// fork (Phase 3): additive post-quantum verification of an ML-DSA-44 shred. A
+// shred is a valid post-quantum shred iff:
+//   (a) the Ed25519 signature authenticates the Merkle root (and thus the
+//       commitment hashed into it) against the slot leader, exactly as the
+//       Ed25519 liveness path checks;
+//   (b) the trailer public key is the one the leader committed to:
+//       ml_dsa_address(pubkey) == the in-root commitment; and
+//   (c) the ML-DSA-44 signature over the Merkle root verifies under that key.
+// This is a NON-GATING audit (telemetry only) — the Ed25519 path gates liveness;
+// ml_dsa verification never discards a shred in v1. Returns false (not panics)
+// for non-ml_dsa or malformed shreds.
+#[must_use]
+pub fn verify_shred_ml_dsa_cpu(packet: &Packet, slot_leaders: &HashMap<Slot, Pubkey>) -> bool {
+    if packet.meta().discard() {
+        return false;
+    }
+    let Some(shred) = shred::layout::get_shred(packet) else {
+        return false;
+    };
+    if !shred::layout::is_ml_dsa_shred(shred) {
+        return false;
+    }
+    let Some(slot) = shred::layout::get_slot(shred) else {
+        return false;
+    };
+    let Some(pubkey) = slot_leaders.get(&slot) else {
+        return false;
+    };
+    let Some(signature) = shred::layout::get_signature(shred) else {
+        return false;
+    };
+    let Some(data) = shred::layout::get_signed_data(shred) else {
+        return false;
+    };
+    // (a) Ed25519 authenticates the Merkle root (which commits to the ml_dsa key).
+    if !signature.verify(pubkey.as_ref(), data.as_ref()) {
+        return false;
+    }
+    let merkle_root = data.as_ref();
+    let Some((commitment, ml_dsa_pubkey, ml_dsa_signature)) =
+        shred::layout::get_ml_dsa_regions(shred)
+    else {
+        return false;
+    };
+    let Ok(ml_dsa_pubkey) = <[u8; MlDsaKeypair::PUBLIC_KEY_LENGTH]>::try_from(ml_dsa_pubkey) else {
+        return false;
+    };
+    // (b) bind the trailer key to the leader via the in-root commitment.
+    if ml_dsa_address(&ml_dsa_pubkey).as_ref() != commitment {
+        return false;
+    }
+    // (c) the post-quantum signature over the Merkle root verifies.
+    let Ok(ml_dsa_signature) = <[u8; MlDsaKeypair::SIGNATURE_LENGTH]>::try_from(ml_dsa_signature)
+    else {
+        return false;
+    };
+    MlDsaPublicKey::from(ml_dsa_pubkey).verify(merkle_root, &ml_dsa_signature)
+}
+
+// fork (Phase 3): non-gating audit pass — verify every ml_dsa shred in the
+// batches and emit ok/fail telemetry. Does NOT mark any packet discard; the
+// Ed25519 pass is the liveness gate. Returns (ok, fail) counts (also for tests).
+pub fn audit_ml_dsa_shreds(
+    batches: &[PacketBatch],
+    slot_leaders: &HashMap<Slot, Pubkey>,
+) -> (usize, usize) {
+    let (mut ok, mut fail) = (0usize, 0usize);
+    for batch in batches {
+        for packet in batch.iter() {
+            if packet.meta().discard() {
+                continue;
+            }
+            let Some(shred) = shred::layout::get_shred(packet) else {
+                continue;
+            };
+            if !shred::layout::is_ml_dsa_shred(shred) {
+                continue;
+            }
+            if verify_shred_ml_dsa_cpu(packet, slot_leaders) {
+                ok += 1;
+            } else {
+                fail += 1;
+            }
+        }
+    }
+    if ok > 0 {
+        inc_new_counter_info!("ml_dsa_shred_verify_ok", ok);
+    }
+    if fail > 0 {
+        inc_new_counter_warn!("ml_dsa_shred_verify_fail", fail);
+    }
+    (ok, fail)
 }
 
 fn verify_shreds_cpu(
@@ -510,6 +606,116 @@ mod tests {
     #[test]
     fn test_sigverify_shred_cpu() {
         run_test_sigverify_shred_cpu(0xdead_c0de);
+    }
+
+    // fork (Phase 3): build a single ml_dsa merkle data shred (Ed25519 leader =
+    // `keypair`, post-quantum signer = `ml_dsa_keypair`). is_last_in_slot=false
+    // keeps the set non-resigned so ml_dsa stays enabled.
+    fn make_ml_dsa_data_shred<R: Rng>(
+        rng: &mut R,
+        slot: Slot,
+        keypair: &Keypair,
+        ml_dsa_keypair: &MlDsaKeypair,
+    ) -> Shred {
+        let reed_solomon_cache = ReedSolomonCache::default();
+        let version = rng.gen();
+        let num_entries = rng.gen_range(64..128);
+        let chained_merkle_root = Hash::new_from_array(rng.gen());
+        let entries = make_entries(rng, num_entries);
+        let (data_shreds, _coding) = Shredder::new(slot, slot - 1, 0, version)
+            .unwrap()
+            .entries_to_shreds(
+                keypair,
+                Some(ml_dsa_keypair),
+                &entries,
+                false,                     // is_last_in_slot
+                Some(chained_merkle_root), // chained_merkle_root
+                0,                         // next_shred_index
+                0,                         // next_code_index
+                true,                      // merkle_variant
+                &reed_solomon_cache,
+                &mut ProcessShredsStats::default(),
+            );
+        let shred = data_shreds.into_iter().next().unwrap();
+        assert!(shred::layout::is_ml_dsa_shred(shred.payload()));
+        shred
+    }
+
+    fn to_packet(shred: &Shred) -> Packet {
+        let mut packet = Packet::default();
+        shred.copy_to_packet(&mut packet);
+        packet
+    }
+
+    #[test]
+    fn test_sigverify_shred_ml_dsa_cpu() {
+        solana_logger::setup();
+        let mut rng = rand::thread_rng();
+        let slot = 0xdead_c0de;
+        let keypair = Keypair::new();
+        let ml_dsa_keypair = MlDsaKeypair::from_seed(&[3u8; 32]);
+        let shred = make_ml_dsa_data_shred(&mut rng, slot, &keypair, &ml_dsa_keypair);
+        let leader_slots = HashMap::from([(slot, keypair.pubkey())]);
+
+        // Honest ml_dsa shred verifies post-quantum.
+        assert!(verify_shred_ml_dsa_cpu(&to_packet(&shred), &leader_slots));
+
+        // Wrong / unknown leader => Ed25519 check (a) fails.
+        assert!(!verify_shred_ml_dsa_cpu(
+            &to_packet(&shred),
+            &HashMap::from([(slot, Keypair::new().pubkey())])
+        ));
+        assert!(!verify_shred_ml_dsa_cpu(
+            &to_packet(&shred),
+            &HashMap::new()
+        ));
+
+        // Tampered ML-DSA signature (flip the last payload byte) => check (c) fails.
+        let mut tampered = to_packet(&shred);
+        let size = tampered.meta().size;
+        tampered.buffer_mut()[size - 1] ^= 0xff;
+        assert!(!verify_shred_ml_dsa_cpu(&tampered, &leader_slots));
+
+        // Forged trailer: a DIFFERENT ml_dsa key validly signs the SAME Merkle
+        // root, so check (c) would pass — but its address != the in-root
+        // commitment, so the binding check (b) rejects it. This is the property
+        // that stops an attacker from swapping the (unsigned) trailer.
+        let merkle_root =
+            shred::layout::get_merkle_root(shred::layout::get_shred(&to_packet(&shred)).unwrap())
+                .unwrap();
+        let attacker = MlDsaKeypair::from_seed(&[0xab; 32]);
+        let attacker_sig = attacker.sign(merkle_root.as_ref()).unwrap();
+        assert!(attacker.verify(merkle_root.as_ref(), &attacker_sig));
+        let mut forged = to_packet(&shred);
+        let size = forged.meta().size;
+        let pubkey_start =
+            size - (MlDsaKeypair::PUBLIC_KEY_LENGTH + MlDsaKeypair::SIGNATURE_LENGTH);
+        let sig_start = pubkey_start + MlDsaKeypair::PUBLIC_KEY_LENGTH;
+        forged.buffer_mut()[pubkey_start..sig_start].copy_from_slice(attacker.public_key_bytes());
+        forged.buffer_mut()[sig_start..sig_start + MlDsaKeypair::SIGNATURE_LENGTH]
+            .copy_from_slice(&attacker_sig);
+        assert!(!verify_shred_ml_dsa_cpu(&forged, &leader_slots));
+
+        // A plain Ed25519 (non-ml_dsa) shred is ignored by the ml_dsa pass.
+        let mut ed_shred = Shred::new_from_data(
+            slot,
+            0,
+            0,
+            &[1, 2, 3, 4],
+            ShredFlags::LAST_SHRED_IN_SLOT,
+            0,
+            0,
+            0,
+        );
+        ed_shred.sign(&keypair);
+        assert!(!verify_shred_ml_dsa_cpu(
+            &to_packet(&ed_shred),
+            &leader_slots
+        ));
+
+        // The non-gating audit pass counts the honest shred as ok.
+        let batches = [PacketBatch::new(vec![to_packet(&shred)])];
+        assert_eq!(audit_ml_dsa_shreds(&batches, &leader_slots), (1, 0));
     }
 
     fn run_test_sigverify_shreds_cpu(thread_pool: &ThreadPool, slot: Slot) {

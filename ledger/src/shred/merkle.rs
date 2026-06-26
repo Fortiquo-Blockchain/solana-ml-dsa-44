@@ -939,6 +939,41 @@ fn write_ml_dsa_trailer(
     Ok(())
 }
 
+// fork (Phase 3): read counterpart of write_ml_dsa_commitment/_trailer. Returns
+// the (commitment, ml_dsa_pubkey, ml_dsa_signature) byte slices of a raw ml_dsa
+// shred, or None for a non-ml_dsa or malformed shred. Used by the verify pass.
+pub(super) fn get_ml_dsa_regions(shred: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
+    let (proof_offset, proof_size) = match shred::layout::get_shred_variant(shred).ok()? {
+        ShredVariant::MerkleData {
+            proof_size,
+            chained,
+            resigned,
+            ml_dsa: true,
+        } => (
+            ShredData::get_proof_offset(proof_size, chained, resigned, true).ok()?,
+            proof_size,
+        ),
+        ShredVariant::MerkleCode {
+            proof_size,
+            chained,
+            resigned,
+            ml_dsa: true,
+        } => (
+            ShredCode::get_proof_offset(proof_size, chained, resigned, true).ok()?,
+            proof_size,
+        ),
+        _ => return None,
+    };
+    let commitment_start = proof_offset.checked_sub(SIZE_OF_ML_DSA_COMMITMENT)?;
+    let commitment = shred.get(commitment_start..proof_offset)?;
+    let trailer = proof_offset + usize::from(proof_size) * SIZE_OF_MERKLE_PROOF_ENTRY;
+    let pubkey_end = trailer + SIZE_OF_ML_DSA_PUBKEY;
+    let sig_end = pubkey_end + SIZE_OF_ML_DSA_SIGNATURE;
+    let pubkey = shred.get(trailer..pubkey_end)?;
+    let signature = shred.get(pubkey_end..sig_end)?;
+    Some((commitment, pubkey, signature))
+}
+
 fn make_merkle_tree(mut nodes: Vec<Hash>) -> Vec<Hash> {
     let mut size = nodes.len();
     while size > 1 {

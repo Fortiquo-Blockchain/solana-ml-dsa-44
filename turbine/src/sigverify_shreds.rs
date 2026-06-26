@@ -3,7 +3,9 @@ use {
     rayon::{prelude::*, ThreadPool, ThreadPoolBuilder},
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::{
-        leader_schedule_cache::LeaderScheduleCache, shred, sigverify_shreds::verify_shreds_gpu,
+        leader_schedule_cache::LeaderScheduleCache,
+        shred,
+        sigverify_shreds::{audit_ml_dsa_shreds, verify_shreds_gpu},
     },
     solana_perf::{self, deduper::Deduper, packet::PacketBatch, recycler_cache::RecyclerCache},
     solana_rayon_threadlimit::get_thread_count,
@@ -155,6 +157,11 @@ fn verify_packets(
             .collect();
     let out = verify_shreds_gpu(thread_pool, packets, &leader_slots, recycler_cache);
     solana_perf::sigverify::mark_disabled(packets, &out);
+    // fork (Phase 3): non-gating post-quantum audit. Verifies any ML-DSA-44
+    // shreds against the same leader schedule and emits ok/fail telemetry,
+    // without affecting the Ed25519 liveness gate above. A no-op (one cheap
+    // variant-byte check per shred) when no ml_dsa shreds are present.
+    audit_ml_dsa_shreds(packets, &leader_slots);
 }
 
 // Returns pubkey of leaders for shred slots refrenced in the packets.

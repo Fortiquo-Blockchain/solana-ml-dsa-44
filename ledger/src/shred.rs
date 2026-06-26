@@ -749,6 +749,23 @@ pub mod layout {
         }
     }
 
+    // fork (Phase 3): true for shreds carrying a post-quantum ML-DSA-44 trailer.
+    pub fn is_ml_dsa_shred(shred: &[u8]) -> bool {
+        matches!(
+            get_shred_variant(shred),
+            Ok(ShredVariant::MerkleData { ml_dsa: true, .. })
+                | Ok(ShredVariant::MerkleCode { ml_dsa: true, .. })
+        )
+    }
+
+    // fork (Phase 3): returns the (commitment, ml_dsa_pubkey, ml_dsa_signature)
+    // byte slices for an ml_dsa shred, or None for a non-ml_dsa or malformed
+    // shred. The 32-byte commitment is sha256(pubkey) inside the Ed25519-signed
+    // merkle region; the [pubkey || signature] trailer follows the merkle proof.
+    pub(crate) fn get_ml_dsa_regions(shred: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
+        merkle::get_ml_dsa_regions(shred)
+    }
+
     // Minimally corrupts the packet so that the signature no longer verifies.
     #[cfg(test)]
     pub(crate) fn corrupt_packet<R: Rng>(
