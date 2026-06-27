@@ -3643,15 +3643,13 @@ pub mod rpc_full {
                 ))
             })?;
             // Post-quantum ML-DSA-44 transactions use a custom wire format tagged by a
-            // 0x00 lead byte. Detect it by decoding first; verify the ML-DSA signatures
-            // and address binding here (in place of the Ed25519 preflight), then forward
-            // the raw bytes (sigverify + banking re-derive everything from them).
-            //
-            // NOTE: this ML-DSA preflight is signature-only by design for Phase 1 — unlike
-            // the Ed25519 branch below it does NOT run a health check or a full
-            // `simulate_transaction`, so an ML-DSA tx with a stale blockhash / insufficient
-            // funds is accepted here and fails later in banking rather than at preflight.
-            // Verification itself is never skipped: sigverify re-checks every 0x00 packet.
+            // 0x00 lead byte. Detect it by decoding first; run the preflight here (in
+            // place of the Ed25519 branch). The ML-DSA signature + address-binding check
+            // stands in for `verify_transaction` (the synthetic 64-byte id is not an
+            // Ed25519 signature), followed by the same health check + `simulate_transaction`
+            // as the Ed25519 path — so a stale blockhash / underfunded fee payer / failing
+            // program is caught at preflight, not later in banking. Then forward the raw
+            // bytes (sigverify + banking re-derive everything from them).
             let ml_dsa_wire: Option<Vec<u8>> = match binary_encoding {
                 TransactionBinaryEncoding::Base58 => bs58::decode(&data).into_vec().ok(),
                 TransactionBinaryEncoding::Base64 => BASE64_STANDARD.decode(&data).ok(),
@@ -3670,27 +3668,93 @@ pub mod rpc_full {
                         .map_err(|e| {
                             Error::invalid_params(format!("invalid ML-DSA transaction: {e:?}"))
                         })?;
-                if !skip_preflight && !mltx.verify_offchain() {
-                    return Err(RpcCustomError::SendTransactionPreflightFailure {
-                        message:
-                            "Transaction simulation failed: ML-DSA signature verification failed"
-                                .to_string(),
-                        result: RpcSimulateTransactionResult {
-                            err: Some(TransactionError::SignatureFailure),
-                            logs: Some(vec![]),
-                            accounts: None,
-                            units_consumed: Some(0),
-                            return_data: None,
-                            inner_instructions: None,
-                        },
-                    }
-                    .into());
-                }
                 let signature = mltx.synthetic_signature();
                 let preflight_bank = &*meta.get_bank_with_config(RpcContextConfig {
                     commitment: preflight_commitment.map(|commitment| CommitmentConfig { commitment }),
                     min_context_slot,
                 })?;
+                if !skip_preflight {
+                    // ML-DSA stands in for the Ed25519 `verify_transaction`: the synthetic
+                    // 64-byte id is not an Ed25519 signature, so verify the post-quantum
+                    // signatures + address binding instead.
+                    if !mltx.verify_offchain() {
+                        return Err(RpcCustomError::SendTransactionPreflightFailure {
+                            message:
+                                "Transaction simulation failed: ML-DSA signature verification failed"
+                                    .to_string(),
+                            result: RpcSimulateTransactionResult {
+                                err: Some(TransactionError::SignatureFailure),
+                                logs: Some(vec![]),
+                                accounts: None,
+                                units_consumed: Some(0),
+                                return_data: None,
+                                inner_instructions: None,
+                            },
+                        }
+                        .into());
+                    }
+
+                    match meta.health.check() {
+                        RpcHealthStatus::Ok => (),
+                        RpcHealthStatus::Unknown => {
+                            inc_new_counter_info!("rpc-send-tx_health-unknown", 1);
+                            return Err(RpcCustomError::NodeUnhealthy {
+                                num_slots_behind: None,
+                            }
+                            .into());
+                        }
+                        RpcHealthStatus::Behind { num_slots } => {
+                            inc_new_counter_info!("rpc-send-tx_health-behind", 1);
+                            return Err(RpcCustomError::NodeUnhealthy {
+                                num_slots_behind: Some(num_slots),
+                            }
+                            .into());
+                        }
+                    }
+
+                    // Build a SanitizedTransaction from the ML-DSA tx (synthetic id +
+                    // legacy message) and simulate it against the preflight bank — parity
+                    // with the Ed25519 path below, catching a stale blockhash / underfunded
+                    // fee payer / failing program at preflight. `simulate_transaction` does
+                    // not re-verify signatures, so the synthetic id is accepted.
+                    let versioned_transaction = VersionedTransaction {
+                        signatures: vec![signature],
+                        message: solana_sdk::message::VersionedMessage::Legacy(
+                            mltx.message.clone(),
+                        ),
+                    };
+                    let sanitized = sanitize_transaction(versioned_transaction, preflight_bank)?;
+                    if let TransactionSimulationResult {
+                        result: Err(err),
+                        logs,
+                        post_simulation_accounts: _,
+                        units_consumed,
+                        return_data,
+                        inner_instructions: _,
+                    } = preflight_bank.simulate_transaction(&sanitized, false)
+                    {
+                        match err {
+                            TransactionError::BlockhashNotFound => {
+                                inc_new_counter_info!("rpc-send-tx_err-blockhash-not-found", 1);
+                            }
+                            _ => {
+                                inc_new_counter_info!("rpc-send-tx_err-other", 1);
+                            }
+                        }
+                        return Err(RpcCustomError::SendTransactionPreflightFailure {
+                            message: format!("Transaction simulation failed: {err}"),
+                            result: RpcSimulateTransactionResult {
+                                err: Some(err),
+                                logs: Some(logs),
+                                accounts: None,
+                                units_consumed: Some(units_consumed),
+                                return_data: return_data.map(|return_data| return_data.into()),
+                                inner_instructions: None,
+                            },
+                        }
+                        .into());
+                    }
+                }
                 let last_valid_block_height = preflight_bank
                     .get_blockhash_last_valid_block_height(&mltx.message.recent_blockhash)
                     .unwrap_or(0);
@@ -6993,6 +7057,61 @@ pub mod tests {
             )
         );
 
+        // fork: a post-quantum ML-DSA-44 transaction with an invalid blockhash is now
+        // rejected at preflight too — the ML-DSA preflight runs simulate_transaction
+        // (parity with the Ed25519 path above), so it no longer forwards a doomed tx.
+        // (health is still Ok here.)
+        let alice = solana_sdk::ml_dsa_keypair::MlDsaKeypair::from_seed(&[1u8; 32]);
+        let mut ml_dsa_message = solana_sdk::message::Message::new(
+            &[solana_sdk::system_instruction::transfer(
+                &alice.address(),
+                &solana_sdk::pubkey::new_rand(),
+                42,
+            )],
+            Some(&alice.address()),
+        );
+        ml_dsa_message.recent_blockhash = Hash::default(); // invalid blockhash
+        let mltx =
+            solana_sdk::ml_dsa_transaction::MlDsaTransaction::sign(ml_dsa_message, &[&alice])
+                .unwrap();
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":["{}"]}}"#,
+            bs58::encode(mltx.serialize()).into_string()
+        );
+        let res = io.handle_request_sync(&req, meta.clone()).unwrap();
+        assert!(
+            res.contains(r#""code":-32002"#) && res.contains("BlockhashNotFound"),
+            "ML-DSA tx with an invalid blockhash must be rejected at preflight, got: {res}"
+        );
+
+        // fork: a VALID-blockhash ML-DSA tx whose fee payer (alice) is unfunded is also
+        // rejected at preflight — proving the blockhash arm is genuinely cleared (so the
+        // bad-blockhash rejection above is not a false positive) and that an underfunded
+        // fee payer is caught at preflight, not later in banking.
+        let valid_blockhash = bank_forks.read().unwrap().root_bank().last_blockhash();
+        let mut funded_message = solana_sdk::message::Message::new(
+            &[solana_sdk::system_instruction::transfer(
+                &alice.address(),
+                &solana_sdk::pubkey::new_rand(),
+                42,
+            )],
+            Some(&alice.address()),
+        );
+        funded_message.recent_blockhash = valid_blockhash;
+        let mltx =
+            solana_sdk::ml_dsa_transaction::MlDsaTransaction::sign(funded_message, &[&alice])
+                .unwrap();
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":["{}"]}}"#,
+            bs58::encode(mltx.serialize()).into_string()
+        );
+        let res = io.handle_request_sync(&req, meta.clone()).unwrap();
+        assert!(
+            res.contains(r#""code":-32002"#) && !res.contains("BlockhashNotFound"),
+            "ML-DSA tx with a valid blockhash but unfunded fee payer must be rejected at \
+             preflight for a non-blockhash reason, got: {res}"
+        );
+
         // sendTransaction will fail due to insanity
         bad_transaction.message.instructions[0].program_id_index = 0u8;
         let recent_blockhash = bank_forks.read().unwrap().root_bank().last_blockhash();
@@ -7059,7 +7178,12 @@ pub mod tests {
             )
         );
 
-        // sendTransaction will fail due to sanitization failure
+        // sendTransaction will fail due to sanitization failure. fork: clearing the
+        // signatures makes the serialized tx start with a 0x00 short-vec length byte,
+        // which collides with the ML-DSA wire marker (also 0x00) — so this 0-signature
+        // tx is routed to and rejected by the ML-DSA decoder rather than Ed25519
+        // sanitization. It is rejected either way; a real Ed25519 tx always has >=1
+        // signature, so its first byte is >=0x01 and never hits the ML-DSA branch.
         bad_transaction.signatures.clear();
         let req = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":["{}"]}}"#,
@@ -7069,7 +7193,7 @@ pub mod tests {
         assert_eq!(
             res,
             Some(
-                r#"{"jsonrpc":"2.0","error":{"code":-32602,"message":"invalid transaction: Transaction failed to sanitize accounts offsets correctly"},"id":1}"#.to_string(),
+                r#"{"jsonrpc":"2.0","error":{"code":-32602,"message":"invalid ML-DSA transaction: IndexOutOfBounds"},"id":1}"#.to_string(),
             )
         );
     }
