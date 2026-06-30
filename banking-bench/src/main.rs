@@ -106,11 +106,16 @@ impl std::str::FromStr for WriteLockContention {
 // NOTE (EPIC 4-2): this harness feeds packets straight to BankingStage, bypassing
 // sigverify, and intentionally overwrites each transaction's signature and payer
 // with RANDOM bytes (below) — it measures banking-stage scheduling / lock
-// contention, not signing or verification. It is therefore left on ed25519: an
-// ML-DSA-44 conversion would exercise neither signing (~20x ed25519) nor verify
-// (~2.3x), only the packet-size effect (ML-DSA txs are ~3.9 KB vs ~0.3 KB), and
-// the 0x00 bridge validates sha256(pubkey)==account_key so the random-key trick
-// would not port. Crypto baseline: programs/ml-dsa-tests/examples/bench_verify.rs.
+// contention, NOT signing or verification, so the signature scheme is orthogonal
+// to what it benchmarks. It stays on ed25519: a faithful ML-DSA-44 conversion
+// would need real keypairs + real signing (~215 us each, impractical at this
+// harness's tx volume) because the 0x00 bridge enforces sha256(pubkey)==account_key
+// so the random-signature trick cannot port — and it would still exercise neither
+// sign nor verify, only packet size. The ML-DSA verify cost IS measured for real
+// against the CPU pipeline elsewhere: ~2.4x ed25519 at ~3.9 KB/packet, via
+//   cargo run --release -p solana-perf --example sigverify_ml_dsa
+//   (and perf/benches/sigverify.rs::bench_sigverify_ml_dsa).
+// Raw crypto primitives: programs/ml-dsa-tests/examples/bench_verify.rs.
 fn make_accounts_txs(
     total_num_transactions: usize,
     packets_per_batch: usize,
