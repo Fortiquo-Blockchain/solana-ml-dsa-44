@@ -16,7 +16,7 @@ use {
             no_outfile_arg, KeyGenerationCommonArgs, NO_OUTFILE_ARG,
         },
         keypair::{
-            keypair_from_path, keypair_from_seed_phrase, signer_from_path,
+            keypair_from_path, keypair_from_seed_phrase, seed_from_seed_phrase, signer_from_path,
             SKIP_SEED_PHRASE_VALIDATION_ARG,
         },
         DisplayError,
@@ -128,6 +128,21 @@ fn resolve_keypair_path(matches: &ArgMatches, config: &Config) -> String {
         path.extend([".config", "solana", "id.json"]);
         path.to_str().unwrap().to_string()
     }
+}
+
+/// Map a 64-byte BIP39 seed to an ML-DSA-44 keypair via the frozen contract
+/// `xi = seed[..32]`. Shared by `new` and `recover` so both derive the SAME
+/// key/address from the same mnemonic + passphrase.
+///
+/// A raw 32-byte prefix is sound: the BIP39 seed is uniformly random
+/// (PBKDF2-HMAC-SHA512) and FIPS 204 re-expands `xi` through SHAKE-256 during
+/// keygen. It is NOT domain-separated from the Ed25519 derivation, so this
+/// mapping must never change once ML-DSA-44 keys exist in the wild.
+fn ml_dsa_keypair_from_bip39_seed(seed: &[u8]) -> MlDsaKeypair {
+    let xi: [u8; 32] = seed[..32]
+        .try_into()
+        .expect("BIP39 seed is always 64 bytes");
+    MlDsaKeypair::from_seed(&xi)
 }
 
 fn output_ml_dsa_keypair(
@@ -561,16 +576,9 @@ fn do_main(matches: &ArgMatches) -> Result<(), Box<dyn error::Error>> {
                         "--derivation-path is not supported for --scheme mldsa44".into(),
                     );
                 }
-                // Frozen contract: the ML-DSA-44 keygen seed (ξ) is the first 32 bytes
-                // of the 64-byte BIP39 seed, so the same mnemonic always recovers the
-                // same key. A raw prefix is sound — the BIP39 seed is uniformly random
-                // (PBKDF2-HMAC-SHA512) and FIPS 204 re-expands ξ through SHAKE-256 during
-                // keygen — but it is NOT domain-separated from the Ed25519 derivation, so
-                // this mapping must never change once ML-DSA-44 keys exist in the wild.
-                let xi: [u8; 32] = seed.as_bytes()[..32]
-                    .try_into()
-                    .expect("BIP39 seed is always 64 bytes");
-                let keypair = MlDsaKeypair::from_seed(&xi);
+                // ξ = seed[..32]; the same mnemonic always recovers the same key
+                // (shared with `recover`, see `ml_dsa_keypair_from_bip39_seed`).
+                let keypair = ml_dsa_keypair_from_bip39_seed(seed.as_bytes());
 
                 if let Some(outfile) = outfile {
                     output_ml_dsa_keypair(&keypair, outfile, "new")
@@ -607,14 +615,6 @@ fn do_main(matches: &ArgMatches) -> Result<(), Box<dyn error::Error>> {
             }
         }
         ("recover", matches) => {
-            if is_mldsa44(matches) {
-                // Deterministic ML-DSA-44 recovery (mnemonic -> key) is not yet wired
-                // through the interactive seed-phrase prompt. Reject explicitly rather
-                // than silently derive an *Ed25519* key from an ML-DSA seed phrase.
-                return Err("recover --scheme mldsa44 is not yet supported; create \
-                            ML-DSA-44 keypairs with `solana-keygen new --scheme mldsa44`"
-                    .into());
-            }
             let mut path = dirs_next::home_dir().expect("home directory");
             let outfile = if matches.is_present("outfile") {
                 matches.value_of("outfile").unwrap()
@@ -627,14 +627,49 @@ fn do_main(matches: &ArgMatches) -> Result<(), Box<dyn error::Error>> {
                 check_for_overwrite(outfile, matches)?;
             }
 
-            let keypair_name = "recover";
-            let keypair = if let Some(path) = matches.value_of("prompt_signer") {
-                keypair_from_path(matches, path, keypair_name, true)?
-            } else {
+            if is_mldsa44(matches) {
+                // ML-DSA-44 recovery is interactive-seed-phrase only: there is no
+                // hardware-wallet / BIP32 path, so a `prompt:`/`ASK` signer URI (an
+                // Ed25519-only path) is rejected rather than silently mis-derived.
+                if matches.value_of("prompt_signer").is_some() {
+                    return Err("a prompt: signer URI is not supported for \
+                                --scheme mldsa44; recover from the seed phrase instead"
+                        .into());
+                }
                 let skip_validation = matches.is_present(SKIP_SEED_PHRASE_VALIDATION_ARG.name);
-                keypair_from_seed_phrase(keypair_name, skip_validation, true, None, true)?
-            };
-            output_keypair(&keypair, outfile, "recovered")?;
+                let seed = seed_from_seed_phrase("recover", skip_validation)?;
+                let keypair = ml_dsa_keypair_from_bip39_seed(&seed);
+
+                // Confirm the recovered address before overwriting any file.
+                use std::io::Write;
+                print!(
+                    "Recovered ML-DSA-44 address `{}`. Continue? (y/n): ",
+                    keypair.address()
+                );
+                let _ = std::io::stdout().flush();
+                let mut input = String::new();
+                std::io::stdin()
+                    .read_line(&mut input)
+                    .expect("Unexpected input");
+                if input.to_lowercase().trim() == "y" {
+                    output_ml_dsa_keypair(&keypair, outfile, "recovered")?;
+                } else {
+                    // Match the Ed25519 recover decline path (exit 1), so scripts
+                    // checking $? behave identically across schemes.
+                    println!("Exiting");
+                    std::process::exit(1);
+                }
+            } else {
+                let keypair_name = "recover";
+                let keypair = if let Some(path) = matches.value_of("prompt_signer") {
+                    keypair_from_path(matches, path, keypair_name, true)?
+                } else {
+                    let skip_validation =
+                        matches.is_present(SKIP_SEED_PHRASE_VALIDATION_ARG.name);
+                    keypair_from_seed_phrase(keypair_name, skip_validation, true, None, true)?
+                };
+                output_keypair(&keypair, outfile, "recovered")?;
+            }
         }
         ("grind", matches) => {
             let ignore_case = matches.is_present("ignore_case");
@@ -1137,14 +1172,34 @@ mod tests {
     }
 
     #[test]
-    fn test_recover_mldsa44_rejected() {
-        // `recover --scheme mldsa44` must fail loudly rather than silently derive an
-        // Ed25519 key from an ML-DSA seed phrase.
+    fn test_mldsa44_recover_derivation_is_deterministic() {
+        // recover and new share `ml_dsa_keypair_from_bip39_seed`, so the same BIP39
+        // seed always yields the same ML-DSA-44 address (xi = seed[..32]); this pins
+        // the frozen recovery contract without the interactive seed-phrase prompt.
+        let mnemonic = bip39::Mnemonic::from_entropy(&[7u8; 32], bip39::Language::English).unwrap();
+        let seed = bip39::Seed::new(&mnemonic, "");
+        let a = ml_dsa_keypair_from_bip39_seed(seed.as_bytes());
+        let b = ml_dsa_keypair_from_bip39_seed(seed.as_bytes());
+        assert_eq!(a.address(), b.address());
+        // Matches the documented contract xi = seed[..32].
+        let xi: [u8; 32] = seed.as_bytes()[..32].try_into().unwrap();
+        assert_eq!(a.address(), MlDsaKeypair::from_seed(&xi).address());
+        // A different passphrase => different seed => different address.
+        let seed2 = bip39::Seed::new(&mnemonic, "different");
+        let c = ml_dsa_keypair_from_bip39_seed(seed2.as_bytes());
+        assert_ne!(a.address(), c.address());
+    }
+
+    #[test]
+    fn test_recover_mldsa44_rejects_prompt_signer_uri() {
+        // A `prompt:`/`ASK` signer URI is an Ed25519-only path; recover
+        // --scheme mldsa44 must reject it rather than mis-derive.
         let outfile_dir = tempdir().unwrap();
         let keypair_path = tmp_outfile_path(&outfile_dir, "out.json");
         let err = process_test_command(&[
             "solana-keygen",
             "recover",
+            "ASK",
             "--scheme",
             "mldsa44",
             "--outfile",
@@ -1153,7 +1208,7 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(
-            err.contains("recover --scheme mldsa44 is not yet supported"),
+            err.contains("prompt: signer URI is not supported for --scheme mldsa44"),
             "unexpected error: {err}"
         );
     }
