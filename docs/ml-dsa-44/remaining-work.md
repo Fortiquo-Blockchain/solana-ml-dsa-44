@@ -145,22 +145,6 @@ proven."
    required signer and legacy `Message` only. Anything else errors out — there
    is no partial support to "test," just a hard boundary to extend.
 
-7. **Pre-existing red tests (not regressions, but not green either).** On this
-   branch, independent of the ML-DSA work, these fail because they hardcode the
-   old 1232 packet size:
-
-   - **10** in `cargo test -p solana-ledger --lib shred` —
-     `shred::legacy::test_sanitize_data_shred`,
-     `shred::tests::test_serde_compat_shred_{code,data,data_empty}`, four
-     `blockstore::tests::*` byte-layout tests, two
-     `shredder::tests::test_shred_fec_set_index::*`.
-   - **3** `crds_gossip_pull` bloom-filter tests in `solana-gossip`.
-
-   Confirmed identical red set with all ML-DSA changes stashed. **Before calling
-   anything "production" these must be either fixed to the new packet size or
-   explicitly waived** — right now a green/red diff can't cleanly tell "my
-   change broke something" from "the baseline was already red."
-
 ---
 
 ## 5. What's already done (documented elsewhere — not repeated here)
@@ -348,9 +332,6 @@ any ABI-gated CI.
   `Message`. Note the size ceiling: each additional ML-DSA signer adds ~3.7 KB,
   so cap signers per transaction and document the limit (this is the
   "multi-signer balloons" risk in [`strategy.md`](./strategy.md) §8).
-- **Resolve the pre-existing red tests (§4.7).** Update the 10 ledger `shred` +
-  3 bloom tests to the `PACKET_DATA_SIZE=8192` layout, or mark them `#[ignore]`
-  with a comment, so the suite is a clean signal.
 
 ---
 
@@ -375,6 +356,12 @@ work are cited inline in §3/§4/§7.)
   `rpc/src/rpc.rs` (`MAX_BASE58_SIZE`/`MAX_BASE64_SIZE`). (See Phase 0 in
   [`implementation.md`](./implementation.md) and Wall #2 in
   [`strategy.md`](./strategy.md).)
+- **`CrdsValue` overhead includes the `CrdsSignature` discriminant.** The
+  Phase-2b `CrdsSignature` enum adds a 4-byte discriminant per gossip value, so
+  any size budget that wraps a `CrdsValue` in a packet must account for it —
+  `DUPLICATE_SHRED_MAX_PAYLOAD_SIZE` reserves 119 (not upstream's 115) for this
+  reason (`gossip/src/cluster_info.rs`, guarded by
+  `test_duplicate_shred_max_payload_size`).
 - **`fips204` pinned at 0.4.6** — the vendored NIST vectors and MSRV depend on
   it.
 

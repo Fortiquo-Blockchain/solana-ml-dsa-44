@@ -214,9 +214,11 @@ default and byte-for-byte unchanged, so the node never stalls.
   live; a node does **not** yet sign its own gossip identity with ML-DSA
   (deferred to Phase 4). Two-node general CRDS propagation is finicky
   (ContactInfo propagates; stake-weighted votes don't at N=2), so the demo uses
-  a ContactInfo value and a bidirectional `insert_info`. Pre-existing: 3
-  `crds_gossip_pull` bloom-filter unit tests fail on this branch independent of
-  this work (a consequence of the fork's `PACKET_DATA_SIZE=8192`).
+  a ContactInfo value and a bidirectional `insert_info`. The `CrdsSignature`
+  enum adds a 4-byte discriminant per gossip value, which required widening
+  `DUPLICATE_SHRED_MAX_PAYLOAD_SIZE` from `PACKET_DATA_SIZE - 115` to `- 119` so
+  a max-size duplicate-shred chunk wrapped in a Push/PullResponse still fits in
+  a packet (`gossip/src/cluster_info.rs`).
 
 Commands: [`runbook.md`](./runbook.md) Phase 2b.
 
@@ -318,18 +320,3 @@ Three follow-ups closed the v1 rough edges:
    = unchanged advisory).
 
 Commands: [`runbook.md`](./runbook.md) Phase 3.
-
----
-
-## Pre-existing fork test failures (not from this work)
-
-On `cargo test -p solana-ledger --lib shred` the baseline (fork
-`PACKET_DATA_SIZE=8192`) is **10 red** —
-`shred::legacy::test_sanitize_data_shred`,
-`shred::tests::test_serde_compat_shred_{code,data,data_empty}`, four
-`blockstore::tests::*` byte-layout tests, and two
-`shredder::tests::test_shred_fec_set_index::*`. All hardcode the old 1232 packet
-size; confirmed identical red set with the ML-DSA work stashed. Plus **3**
-`crds_gossip_pull` bloom-filter tests in `solana-gossip`. See
-[`remaining-work.md`](./remaining-work.md) §4 for how to resolve them before
-calling anything "production".

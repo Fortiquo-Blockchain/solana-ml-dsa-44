@@ -240,10 +240,6 @@ validator and the sibling `@noble/post-quantum` JS wallet produce **byte-identic
 and signatures (empty context). Signing is hedged (randomized); byte-KATs use the
 deterministic path.
 
-> **Known pre-existing red tests on this fork (not regressions):** 10 `solana-ledger` > `shred` tests + 3 `crds_gossip_pull` bloom tests hardcode the old 1,232 packet size and
-> fail because the fork sets `PACKET_DATA_SIZE = 8192`. Confirmed identical with the
-> ML-DSA work stashed.
-
 ---
 
 ## What changed in the codebase (orientation map)

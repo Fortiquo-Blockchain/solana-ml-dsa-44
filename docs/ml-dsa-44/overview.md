@@ -125,7 +125,6 @@ unblocking plan are detailed in [`remaining-work.md`](./remaining-work.md).
 | **Block explorer** (Solscan-style) | Stakeholders need to see PQ transactions on-chain — see [`explorer-roadmap.md`](./explorer-roadmap.md) | Medium      |
 | **Browser / mobile wallet**        | Payments are useless without a wallet people can use                                                   | Medium–High |
 | **Multi-node test cluster**        | Prove PQ works with 3+ validators, not just one machine                                                | Medium      |
-| **Fix pre-existing test failures** | ~13 unit tests fail due to the packet-size change; no functional blocker but hurts CI confidence       | Low         |
 
 ### Tier 2 — Phase 4: full validator identity cutover _(strategic, not started)_
 
@@ -172,7 +171,7 @@ flowchart LR
 ```
 
 1. **Done** — Phases 0–3 proof-of-concept: all five signing surfaces, single node.
-2. **Tier 1 — pilot network** _(recommended next)_: block explorer, PQ wallet, multi-node cluster, CI test cleanup.
+2. **Tier 1 — pilot network** _(recommended next)_: block explorer, PQ wallet, multi-node cluster.
 3. **Tier 2 — identity cutover**: Phase 4 — PQ node identity and TLS.
 4. **Tier 3 — production**: hardening, PQ-only mode, external security audit.
 
