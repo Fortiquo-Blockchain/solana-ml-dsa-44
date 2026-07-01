@@ -120,12 +120,12 @@ unblocking plan are detailed in [`remaining-work.md`](./remaining-work.md).
 
 ### Tier 1 — Finish the demo / pilot network _(recommended next)_
 
-| Work item                          | Why it matters                                                                                         | Effort                   |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------ |
-| **Block explorer** (Solscan-style) | Stakeholders need to see PQ transactions on-chain — see [`explorer-roadmap.md`](./explorer-roadmap.md) | Medium (6–10 weeks)      |
-| **Browser / mobile wallet**        | Payments are useless without a wallet people can use                                                   | Medium–High (8–12 weeks) |
-| **Multi-node test cluster**        | Prove PQ works with 3+ validators, not just one machine                                                | Medium (4–6 weeks)       |
-| **Fix pre-existing test failures** | ~13 unit tests fail due to the packet-size change; no functional blocker but hurts CI confidence       | Low (1–2 weeks)          |
+| Work item                          | Why it matters                                                                                         | Effort      |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------ | ----------- |
+| **Block explorer** (Solscan-style) | Stakeholders need to see PQ transactions on-chain — see [`explorer-roadmap.md`](./explorer-roadmap.md) | Medium      |
+| **Browser / mobile wallet**        | Payments are useless without a wallet people can use                                                   | Medium–High |
+| **Multi-node test cluster**        | Prove PQ works with 3+ validators, not just one machine                                                | Medium      |
+| **Fix pre-existing test failures** | ~13 unit tests fail due to the packet-size change; no functional blocker but hurts CI confidence       | Low         |
 
 ### Tier 2 — Phase 4: full validator identity cutover _(strategic, not started)_
 
@@ -134,7 +134,7 @@ The **largest remaining engineering block.** Today the node's network identity
 
 | Work item                                                 | Why it matters                                   | Effort                            | Risk                                |
 | --------------------------------------------------------- | ------------------------------------------------ | --------------------------------- | ----------------------------------- |
-| **PQ node identity**                                      | Node authenticates as a PQ address, not a hybrid | High (12–16 weeks)                | High — can partition nodes if wrong |
+| **PQ node identity**                                      | Node authenticates as a PQ address, not a hybrid | High                              | High — can partition nodes if wrong |
 | **TLS / QUIC certificate redesign**                       | Current certs require Ed25519 secret keys        | High                              | Blocks PQ-only networking           |
 | **Node signs its own gossip identity with PQ**            | Completes surface 2b                             | Medium (depends on identity work) | Medium                              |
 | **Replace Ed25519 liveness shred signature with PQ-only** | True PQ block broadcast (today PQ is additive)   | High                              | Medium — ~2× shred volume already   |
@@ -148,7 +148,7 @@ The **largest remaining engineering block.** Today the node's network identity
 | **PQ-only network mode**                          | Turn off Ed25519 entirely                     | Medium (after Phase 4) |
 | **Performance optimization** (GPU/CUDA PQ verify) | PQ verify is CPU-heavy; no hardware fast-path | Ongoing                |
 | **Operational runbooks**                          | Key rotation, monitoring, incident response   | Low–Medium             |
-| **Security audit**                                | External review before any production launch  | 4–8 weeks (vendor)     |
+| **Security audit**                                | External review before any production launch  | External (vendor)      |
 
 ### Explicitly out of scope
 
@@ -161,30 +161,22 @@ The **largest remaining engineering block.** Today the node's network identity
 
 ## Roadmap
 
+Ordered by priority, not calendar — each stage gates the next. The work items in
+each stage are in [What remains](#what-remains) above.
+
 ```mermaid
-gantt
-    title ML-DSA Migration — suggested timeline
-    dateFormat YYYY-MM
-    section Done
-    Phases 0-3 PoC           :done, p03, 2026-05, 2026-06
-    section Tier 1 Pilot
-    Explorer MVP             :t1a, 2026-07, 2026-09
-    PQ Wallet                :t1b, 2026-07, 2026-10
-    Multi-node cluster       :t1c, 2026-08, 2026-09
-    section Tier 2 Identity
-    Phase 4 design           :t2a, 2026-09, 2026-10
-    Phase 4 implementation   :t2b, 2026-10, 2027-01
-    section Tier 3 Production
-    Hardening + audit        :t3, 2027-01, 2027-04
+flowchart LR
+    D["✅ Done<br/>Phases 0–3 PoC"] --> T1["Tier 1<br/>Explorer · wallet · multi-node"]
+    T1 --> T2["Tier 2<br/>Phase 4 — node identity / TLS"]
+    T2 --> T3["Tier 3<br/>Hardening + audit"]
 ```
 
-| Period             | Focus                                         |
-| ------------------ | --------------------------------------------- |
-| **Jul – Sep 2026** | Explorer MVP, PQ wallet, 3+ validator testnet |
-| **Sep – Dec 2026** | Phase 4 — PQ node identity and TLS            |
-| **Q1 2027**        | Production hardening and external audit       |
+1. **Done** — Phases 0–3 proof-of-concept: all five signing surfaces, single node.
+2. **Tier 1 — pilot network** _(recommended next)_: block explorer, PQ wallet, multi-node cluster, CI test cleanup.
+3. **Tier 2 — identity cutover**: Phase 4 — PQ node identity and TLS.
+4. **Tier 3 — production**: hardening, PQ-only mode, external security audit.
 
-_Timeline is indicative — adjust to team size and priorities._
+_Sequencing, not scheduling — no dates are committed here._
 
 ---
 
