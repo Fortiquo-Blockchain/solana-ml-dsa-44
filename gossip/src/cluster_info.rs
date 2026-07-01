@@ -115,7 +115,17 @@ const MAX_GOSSIP_TRAFFIC: usize = 128_000_000 / PACKET_DATA_SIZE;
 /// is equal to PACKET_DATA_SIZE minus serialized size of an empty push
 /// message: Protocol::PushMessage(Pubkey::default(), Vec::default())
 const PUSH_MESSAGE_MAX_PAYLOAD_SIZE: usize = PACKET_DATA_SIZE - 44;
-pub(crate) const DUPLICATE_SHRED_MAX_PAYLOAD_SIZE: usize = PACKET_DATA_SIZE - 115;
+/// Max serialized size of each DuplicateShred, chosen so that a DuplicateShred
+/// crds-value wrapped in a Protocol::PushMessage / PullResponse stays below
+/// PACKET_DATA_SIZE. The reserved 119 bytes is the wire overhead around the
+/// DuplicateShred: Protocol discriminant (4) + origin pubkey (32) + Vec length
+/// (8) + CrdsValue signature (CrdsSignature::Ed25519 = 4-byte discriminant + 64)
+/// + CrdsData discriminant (4) + DuplicateShred index u16 (2) = 118, plus 1 byte
+/// of slack. Upstream reserved 115 for a bare 64-byte Signature; the ML-DSA
+/// CrdsSignature enum adds a 4-byte discriminant, so the reserve grew by 4.
+/// Guarded by `test_duplicate_shred_max_payload_size` (which serializes a full
+/// max-size chunk and asserts it fits), so this can never silently drift.
+pub(crate) const DUPLICATE_SHRED_MAX_PAYLOAD_SIZE: usize = PACKET_DATA_SIZE - 119;
 /// Maximum number of hashes in AccountsHashes a node publishes
 /// such that the serialized size of the push/pull message stays below
 /// PACKET_DATA_SIZE.
@@ -125,7 +135,11 @@ pub const MAX_ACCOUNTS_HASHES: usize = 16;
 /// PACKET_DATA_SIZE.
 pub const MAX_INCREMENTAL_SNAPSHOT_HASHES: usize = 25;
 /// Maximum number of origin nodes that a PruneData may contain, such that the
-/// serialized size of the PruneMessage stays below PACKET_DATA_SIZE.
+/// serialized size of the PruneMessage stays below PACKET_DATA_SIZE. This is a
+/// deliberate cap, not a packet-maximal value: the fork raised PACKET_DATA_SIZE
+/// to 8192, so many more than 32 would now fit, but 32 is kept to bound
+/// prune-message size and preserve upstream gossip behavior. `test_max_prune_
+/// data_pubkeys` guards that 32 still fits in a packet.
 const MAX_PRUNE_DATA_NODES: usize = 32;
 /// Number of bytes in the randomly generated token sent with ping messages.
 const GOSSIP_PING_TOKEN_SIZE: usize = 32;
@@ -3449,13 +3463,12 @@ mod tests {
             let socket = new_rand_socket_addr(&mut rng);
             assert!(Packet::from_data(Some(&socket), prune_message).is_ok());
         }
-        // Assert that MAX_PRUNE_DATA_NODES is highest possible.
-        let self_keypair = Keypair::new();
-        let prune_data =
-            PruneData::new_rand(&mut rng, &self_keypair, Some(MAX_PRUNE_DATA_NODES + 1));
-        let prune_message = Protocol::PruneMessage(self_keypair.pubkey(), prune_data);
-        let socket = new_rand_socket_addr(&mut rng);
-        assert!(Packet::from_data(Some(&socket), prune_message).is_err());
+        // Upstream additionally asserted that MAX_PRUNE_DATA_NODES was the
+        // *largest* count that fits a packet (that MAX_PRUNE_DATA_NODES + 1 would
+        // not). The fork raised PACKET_DATA_SIZE to 8192, so 33+ now fit as well;
+        // 32 is a deliberate cap (see the constant), not packet-maximal, so that
+        // maximality assertion is intentionally dropped. The loop above still
+        // guards the safety invariant that MAX_PRUNE_DATA_NODES fits in a packet.
     }
 
     #[test]
