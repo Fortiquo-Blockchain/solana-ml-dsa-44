@@ -12,7 +12,8 @@ Ed25519 to ML-DSA-44** — the post-quantum signature standardized by NIST in
 (flip the node identity itself to an ML-DSA address) is deferred — see
 [Migration phases](#migration-phases). The full strategy and the engineering details
 live in [`docs/ml-dsa-migration.md`](docs/ml-dsa-migration.md) and
-[`CLAUDE.md`](CLAUDE.md).
+[`CLAUDE.md`](CLAUDE.md). What's still **pending** to take it further is catalogued in
+[`docs/ml-dsa-remaining-work.md`](docs/ml-dsa-remaining-work.md).
 
 ---
 

@@ -71,7 +71,7 @@ Open the repo via **Remote-WSL** so rust-analyzer uses the WSL toolchain (the sy
 3. `rust-src` is installed and `.vscode/settings.json` tunes rust-analyzer for this large workspace (separate target dir so it won't invalidate your `--release` build). First index takes a few minutes.
 
 ## Post-quantum signatures (ML-DSA-44) — fork goal
-This fork is migrating Solana's signatures from Ed25519 to **ML-DSA-44** (NIST FIPS 204, post-quantum). The full strategy, the five signature surfaces, and the phased roadmap live in **`docs/ml-dsa-migration.md`**.
+This fork is migrating Solana's signatures from Ed25519 to **ML-DSA-44** (NIST FIPS 204, post-quantum). The full strategy, the five signature surfaces, and the phased roadmap live in **`docs/ml-dsa-migration.md`**. What is still **pending** to take the chain further lives in **`docs/ml-dsa-remaining-work.md`** — a living doc: when an item lands, prune it from that doc rather than annotating it done.
 
 **Phase 0 — done & verified:** an on-chain **ML-DSA-44 precompile** (the post-quantum analogue of the ed25519 precompile) that lets transactions verify ML-DSA-44 signatures. Phase 0 itself changed nothing about *how* things are signed — see **Phase 1** below, which replaces transaction signing for user payments.
 

@@ -310,3 +310,7 @@ sections). Next up: Phase 4 — flip the node identity to the ML-DSA address
 (blocked today by the QUIC/TLS Ed25519 cert wall + the fixed-width Ping/Pong/
 PruneData signatures), which also unblocks a node signing its own gossip
 identity with ML-DSA._
+
+_For a continuation guide — everything still pending, the surfaces added but not yet
+tested at scale, a single-node go-live runbook, and the unblocking roadmap for Phase 4 /
+GPU / multi-node — see [`ml-dsa-remaining-work.md`](ml-dsa-remaining-work.md)._
