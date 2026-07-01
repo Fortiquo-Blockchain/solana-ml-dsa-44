@@ -1,7 +1,7 @@
 //! NIST FIPS 204 (ML-DSA-44) known-answer & cross-implementation conformance tests.
 //!
 //! Why this exists: the whole fork rests on the claim that our signatures really
-//! are FIPS 204. `docs/ml-dsa-migration.md` §8 flagged "must match the reference
+//! are FIPS 204. `docs/ml-dsa-44/strategy.md` §8 flagged "must match the reference
 //! implementation exactly" as a High risk whose mitigation ("a shared
 //! cross-implementation test") was still open. This locks it down with an
 //! authoritative answer key, so a future `fips204` bump or a wiring slip fails

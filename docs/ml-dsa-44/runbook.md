@@ -5,12 +5,14 @@
 
 This guide shows **two ways** to test each phase:
 
-| Way | Best for |
-|-----|----------|
-| **A — Script** | Fast smoke test; one command boots validator, runs test, tears down |
-| **B — Manual CLI** | Learning how it works; keep the chain running and re-run tests |
+| Way                | Best for                                                            |
+| ------------------ | ------------------------------------------------------------------- |
+| **A — Script**     | Fast smoke test; one command boots validator, runs test, tears down |
+| **B — Manual CLI** | Learning how it works; keep the chain running and re-run tests      |
 
-> **Note on Phase 4:** Phases **0–3** are implemented and testable today. **Phase 4** (full PQ node identity / TLS cutover) is **not built yet** — see [What Phase 4 would be](#phase-4--not-available-yet) at the end.
+> **Note on Phase 4:** Phases **0–3** are implemented and testable today.
+> **Phase 4** (full PQ node identity / TLS cutover) is **not built yet** — see
+> [What Phase 4 would be](#phase-4--not-available-yet) at the end.
 
 ---
 
@@ -18,13 +20,13 @@ This guide shows **two ways** to test each phase:
 
 ### What you need
 
-| Requirement | Why |
-|-------------|-----|
-| **Linux or macOS shell** | Bash required for scripts; validator does not run on native Windows |
-| **Rust 1.76.0** | Pinned by `rust-toolchain.toml`; install via [rustup](https://rustup.rs) |
-| **Build tools** | `clang`, `cmake`, `pkg-config`, `openssl`, `protobuf` |
-| **~20 GB disk** | First `cargo build --release` is large |
-| **Two terminal tabs** | Manual method: one for the chain, one for tests |
+| Requirement              | Why                                                                      |
+| ------------------------ | ------------------------------------------------------------------------ |
+| **Linux or macOS shell** | Bash required for scripts; validator does not run on native Windows      |
+| **Rust 1.76.0**          | Pinned by `rust-toolchain.toml`; install via [rustup](https://rustup.rs) |
+| **Build tools**          | `clang`, `cmake`, `pkg-config`, `openssl`, `protobuf`                    |
+| **~20 GB disk**          | First `cargo build --release` is large                                   |
+| **Two terminal tabs**    | Manual method: one for the chain, one for tests                          |
 
 ### Step 0 — Clone and enter the repo
 
@@ -32,7 +34,8 @@ This guide shows **two ways** to test each phase:
 cd /path/to/solana-ml-dsa-44
 ```
 
-**What this does:** Moves you into the validator source tree. All commands below assume you are here.
+**What this does:** Moves you into the validator source tree. All commands below
+assume you are here.
 
 ---
 
@@ -45,7 +48,8 @@ cargo build --release \
   --bin solana-keygen
 ```
 
-**What this does:** Compiles the local test validator and CLI tools. Output lands in `target/release/`.
+**What this does:** Compiles the local test validator and CLI tools. Output
+lands in `target/release/`.
 
 ---
 
@@ -55,7 +59,9 @@ cargo build --release \
 export PATH="/path/to/solana-ml-dsa-44/target/release:$PATH"
 ```
 
-**What this does:** Lets you type `solana`, `solana-keygen`, and `solana-test-validator` without a full path. Add this line to `~/.bashrc` or `~/.zshrc` to make it permanent.
+**What this does:** Lets you type `solana`, `solana-keygen`, and
+`solana-test-validator` without a full path. Add this line to `~/.bashrc` or
+`~/.zshrc` to make it permanent.
 
 ---
 
@@ -65,35 +71,38 @@ export PATH="/path/to/solana-ml-dsa-44/target/release:$PATH"
 solana config set --url http://127.0.0.1:8899
 ```
 
-**What this does:** Tells `solana` commands to talk to your **local** validator, not mainnet.
+**What this does:** Tells `solana` commands to talk to your **local** validator,
+not mainnet.
 
 ---
 
 ## Phase overview
 
-| Phase | What you are testing | Validator flags needed |
-|-------|----------------------|------------------------|
-| **0** | On-chain ML-DSA signature **verify** (precompile) | None (plain validator) |
-| **1** | **User payment** signed with ML-DSA-44 | None (plain validator) |
-| **2** | Validator **consensus votes** signed with ML-DSA-44 | `--ml-dsa-vote <KEYFILE>` |
-| **2b** | **Gossip** CRDS values carry PQ signatures | None (automated test, not live CLI demo) |
-| **3** | **Block shreds** carry PQ attestation | `--ml-dsa-shred <KEYFILE>` |
-| **4** | Full PQ node identity | **Not implemented** |
+| Phase  | What you are testing                                | Validator flags needed                   |
+| ------ | --------------------------------------------------- | ---------------------------------------- |
+| **0**  | On-chain ML-DSA signature **verify** (precompile)   | None (plain validator)                   |
+| **1**  | **User payment** signed with ML-DSA-44              | None (plain validator)                   |
+| **2**  | Validator **consensus votes** signed with ML-DSA-44 | `--ml-dsa-vote <KEYFILE>`                |
+| **2b** | **Gossip** CRDS values carry PQ signatures          | None (automated test, not live CLI demo) |
+| **3**  | **Block shreds** carry PQ attestation               | `--ml-dsa-shred <KEYFILE>`               |
+| **4**  | Full PQ node identity                               | **Not implemented**                      |
 
 **Endpoints once the validator is running:**
 
-| Service | URL |
-|---------|-----|
-| JSON-RPC | `http://127.0.0.1:8899` |
-| WebSocket | `ws://127.0.0.1:8900` |
+| Service   | URL                     |
+| --------- | ----------------------- |
+| JSON-RPC  | `http://127.0.0.1:8899` |
+| WebSocket | `ws://127.0.0.1:8900`   |
 
-**Stop any validator:** press **Ctrl-C** in its terminal, or `kill` the background process.
+**Stop any validator:** press **Ctrl-C** in its terminal, or `kill` the
+background process.
 
 ---
 
 ## Phase 0 — On-chain ML-DSA verify (precompile)
 
-**What success looks like:** A post-quantum signed transaction is **accepted** on-chain; a tampered signature is **rejected**.
+**What success looks like:** A post-quantum signed transaction is **accepted**
+on-chain; a tampered signature is **rejected**.
 
 ---
 
@@ -156,7 +165,8 @@ cargo build --release -p solana-ml-dsa-program-tests --example submit_live
 - Submits a tampered transaction → should be **rejected**
 - Prints keys, signatures, and raw JSON-RPC request/response for each step
 
-You can re-run `./target/release/examples/submit_live` as many times as you like while Terminal 1 is still up.
+You can re-run `./target/release/examples/submit_live` as many times as you like
+while Terminal 1 is still up.
 
 ---
 
@@ -179,7 +189,8 @@ solana slot
 
 ## Phase 1 — Post-quantum user payments
 
-**What success looks like:** A SOL transfer whose **fee payer** signs with ML-DSA-44 confirms on-chain; a forged transfer is rejected.
+**What success looks like:** A SOL transfer whose **fee payer** signs with
+ML-DSA-44 confirms on-chain; a forged transfer is rejected.
 
 ---
 
@@ -189,7 +200,8 @@ solana slot
 bash programs/ml-dsa-tests/demo-transfer.sh
 ```
 
-**What this does:** Same pattern as Phase 0, but runs `ml_dsa_transfer` instead — airdrop → PQ transfer → balance check → reject tampered tx.
+**What this does:** Same pattern as Phase 0, but runs `ml_dsa_transfer` instead
+— airdrop → PQ transfer → balance check → reject tampered tx.
 
 ```bash
 bash programs/ml-dsa-tests/demo-transfer.sh --build   # after Rust edits
@@ -237,15 +249,18 @@ cargo build --release -p solana-ml-dsa-program-tests --example ml_dsa_transfer
 solana-keygen new --scheme mldsa44 -o /tmp/my-mldsa.bin --no-bip39-passphrase
 ```
 
-**What this does:** Creates a post-quantum keypair file compatible with this fork.
+**What this does:** Creates a post-quantum keypair file compatible with this
+fork.
 
 ---
 
 ## Phase 2 — Post-quantum validator votes
 
-**What success looks like:** The validator signs its own **consensus votes** with ML-DSA-44; slots and `lastVote` keep climbing; the chain **finalizes**.
+**What success looks like:** The validator signs its own **consensus votes**
+with ML-DSA-44; slots and `lastVote` keep climbing; the chain **finalizes**.
 
-> **Important:** PQ voting happens **inside** the validator. The flag goes on the **chain** terminal, not the test terminal.
+> **Important:** PQ voting happens **inside** the validator. The flag goes on
+> the **chain** terminal, not the test terminal.
 
 ---
 
@@ -259,7 +274,8 @@ bash programs/ml-dsa-tests/demo-vote.sh
 
 1. Starts validator with `--ml-dsa-vote /tmp/mldsa-vote-keypair.bin`
 2. Repoints genesis vote account to the PQ voter address
-3. Polls `getSlot` and `getVoteAccounts` to prove finalized slots and `lastVote` advance
+3. Polls `getSlot` and `getVoteAccounts` to prove finalized slots and `lastVote`
+   advance
 4. Stops the validator when done
 
 ```bash
@@ -282,13 +298,14 @@ solana-test-validator --reset \
 
 **What each flag does:**
 
-| Flag | Purpose |
-|------|---------|
-| `--reset` | Fresh genesis |
-| `--ledger ~/solana-test-ledger-mldsa-vote` | Separate ledger from Phase 0/1 (avoids conflicts) |
-| `--ml-dsa-vote /tmp/mldsa-vote.bin` | Load or **create** an ML-DSA vote keypair; validator signs votes with it |
+| Flag                                       | Purpose                                                                  |
+| ------------------------------------------ | ------------------------------------------------------------------------ |
+| `--reset`                                  | Fresh genesis                                                            |
+| `--ledger ~/solana-test-ledger-mldsa-vote` | Separate ledger from Phase 0/1 (avoids conflicts)                        |
+| `--ml-dsa-vote /tmp/mldsa-vote.bin`        | Load or **create** an ML-DSA vote keypair; validator signs votes with it |
 
-Watch startup log for lines like `voter address: ...` and `Phase 2: ML-DSA-44 votes enabled`.
+Watch startup log for lines like `voter address: ...` and
+`Phase 2: ML-DSA-44 votes enabled`.
 
 Leave this terminal running.
 
@@ -308,7 +325,8 @@ solana slot --commitment finalized
 # Wait 10 seconds, run again — number should increase
 ```
 
-**What this does:** Confirms the chain is producing and **finalizing** blocks on PQ votes.
+**What this does:** Confirms the chain is producing and **finalizing** blocks on
+PQ votes.
 
 ---
 
@@ -318,7 +336,8 @@ solana slot --commitment finalized
 solana vote-account ~/solana-test-ledger-mldsa-vote/vote-account-keypair.json
 ```
 
-**What this does:** Shows the vote account. The **Vote Authority** should be the ML-DSA address (not the Ed25519 node identity).
+**What this does:** Shows the vote account. The **Vote Authority** should be the
+ML-DSA address (not the Ed25519 node identity).
 
 ---
 
@@ -342,13 +361,15 @@ solana-test-validator --reset --ledger ~/solana-test-ledger
 solana slot --commitment finalized   # should still advance
 ```
 
-**What this does:** Confirms default Ed25519 voting is unchanged when the PQ flag is off.
+**What this does:** Confirms default Ed25519 voting is unchanged when the PQ
+flag is off.
 
 ---
 
 ## Phase 2b — Post-quantum gossip (optional)
 
-**What success looks like:** ML-DSA-signed gossip CRDS values verify and propagate between two live nodes.
+**What success looks like:** ML-DSA-signed gossip CRDS values verify and
+propagate between two live nodes.
 
 There is **no single CLI demo script** for Phase 2b. Use the automated test:
 
@@ -360,18 +381,23 @@ cargo test -p solana-gossip --test gossip ml_dsa_crds_value_propagates_between_l
 
 **What this does:**
 
-- First test: unit tests for PQ signature verify + address binding on CRDS values
-- Second test: spins up two gossip nodes; proves an ML-DSA CRDS value propagates A→B
+- First test: unit tests for PQ signature verify + address binding on CRDS
+  values
+- Second test: spins up two gossip nodes; proves an ML-DSA CRDS value propagates
+  A→B
 
-**Note:** A node does **not** yet sign its own gossip identity with PQ (deferred to Phase 4).
+**Note:** A node does **not** yet sign its own gossip identity with PQ (deferred
+to Phase 4).
 
 ---
 
 ## Phase 3 — Post-quantum block shreds
 
-**What success looks like:** The validator produces blocks normally; produced shreds carry a valid ML-DSA-44 attestation (verified offline).
+**What success looks like:** The validator produces blocks normally; produced
+shreds carry a valid ML-DSA-44 attestation (verified offline).
 
-> **Important:** A single node's own shreds skip turbine verify, so the demo **stops the validator** and checks shreds from the blockstore directly.
+> **Important:** A single node's own shreds skip turbine verify, so the demo
+> **stops the validator** and checks shreds from the blockstore directly.
 
 ---
 
@@ -408,8 +434,8 @@ solana-test-validator --reset \
 
 **What each flag does:**
 
-| Flag | Purpose |
-|------|---------|
+| Flag                                  | Purpose                                                             |
+| ------------------------------------- | ------------------------------------------------------------------- |
 | `--ml-dsa-shred /tmp/mldsa-shred.bin` | Sign each FEC-set Merkle root with ML-DSA-44 in addition to Ed25519 |
 
 Optional strict mode (drops invalid PQ shreds at turbine ingress):
@@ -421,7 +447,8 @@ solana-test-validator --reset \
   --ml-dsa-shred-strict
 ```
 
-Wait until slots advance (~30 seconds), then **stop the validator** with **Ctrl-C**.
+Wait until slots advance (~30 seconds), then **stop the validator** with
+**Ctrl-C**.
 
 ---
 
@@ -441,7 +468,8 @@ IDENTITY=$(solana-keygen pubkey ~/solana-test-ledger-mldsa-shred/validator-keypa
 **What this does:**
 
 - Reads the blockstore directly from the ledger directory
-- For each ML-DSA shred: verifies Ed25519 Merkle sig + PQ commitment binding + ML-DSA signature
+- For each ML-DSA shred: verifies Ed25519 Merkle sig + PQ commitment binding +
+  ML-DSA signature
 - Exit code **0** = PASS
 
 ---
@@ -455,7 +483,8 @@ IDENTITY=$(solana-keygen pubkey ~/solana-test-ledger-mldsa-shred/validator-keypa
 - Node signs its **own gossip identity** with PQ
 - Optional: PQ-only shred liveness (today Ed25519 remains load-bearing)
 
-**There are no CLI commands or flags to test Phase 4 today.** Track progress in [`ml-dsa-migration-status.md`](./ml-dsa-migration-status.md).
+**There are no CLI commands or flags to test Phase 4 today.** Track progress in
+[`overview.md`](./overview.md).
 
 ---
 
@@ -485,11 +514,11 @@ Add `--build` after any Rust code change.
 
 ## Quick reference — manual two-terminal pattern
 
-| Phase | Terminal 1 (chain) | Terminal 2 (test / observe) |
-|-------|------------------|-------------------------------|
-| **0** | `solana-test-validator --reset --ledger ~/solana-test-ledger` | `./target/release/examples/submit_live` |
-| **1** | same as Phase 0 | `./target/release/examples/ml_dsa_transfer` |
-| **2** | `solana-test-validator --reset --ledger ~/solana-test-ledger-mldsa-vote --ml-dsa-vote /tmp/mldsa-vote.bin` | `solana slot`, `solana vote-account ...`, `getVoteAccounts` |
+| Phase | Terminal 1 (chain)                                                                                                            | Terminal 2 (test / observe)                                          |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| **0** | `solana-test-validator --reset --ledger ~/solana-test-ledger`                                                                 | `./target/release/examples/submit_live`                              |
+| **1** | same as Phase 0                                                                                                               | `./target/release/examples/ml_dsa_transfer`                          |
+| **2** | `solana-test-validator --reset --ledger ~/solana-test-ledger-mldsa-vote --ml-dsa-vote /tmp/mldsa-vote.bin`                    | `solana slot`, `solana vote-account ...`, `getVoteAccounts`          |
 | **3** | `solana-test-validator --reset --ledger ~/solana-test-ledger-mldsa-shred --ml-dsa-shred /tmp/mldsa-shred.bin` → wait → Ctrl-C | `./target/release/examples/verify_ml_dsa_shreds <ledger> <identity>` |
 
 ---
@@ -514,29 +543,31 @@ cargo test -p solana-ledger --lib shred::merkle
 cargo test -p solana-ledger --lib sigverify_shreds
 ```
 
-**What this does:** Runs automated tests without starting a live validator (faster for developers).
+**What this does:** Runs automated tests without starting a live validator
+(faster for developers).
 
 ---
 
 ## Troubleshooting
 
-| Problem | What to try |
-|---------|-------------|
-| `solana-test-validator: command not found` | Run `export PATH="$PWD/target/release:$PATH"` |
-| `Address already in use` (port 8899) | Another validator is running; stop it or use a different machine |
-| Validator won't start | Check ledger path is on local disk (`~/...`), not a slow network mount |
-| Demo times out waiting for RPC | Read log: `/tmp/mldsa_demo_validator.log` or the ledger's `validator.log` |
-| `error: expected item, found '..'` in build.rs | Git symlinks broken — see [`../CLAUDE.md`](../CLAUDE.md) symlink fix |
-| Phase 3 verify fails | Ensure validator ran long enough (~20 slots) before Ctrl-C |
-| GPU sigverify drops PQ txs | Use default `solana-test-validator` (GPU off); don't enable perf-libs GPU path |
+| Problem                                        | What to try                                                                    |
+| ---------------------------------------------- | ------------------------------------------------------------------------------ |
+| `solana-test-validator: command not found`     | Run `export PATH="$PWD/target/release:$PATH"`                                  |
+| `Address already in use` (port 8899)           | Another validator is running; stop it or use a different machine               |
+| Validator won't start                          | Check ledger path is on local disk (`~/...`), not a slow network mount         |
+| Demo times out waiting for RPC                 | Read log: `/tmp/mldsa_demo_validator.log` or the ledger's `validator.log`      |
+| `error: expected item, found '..'` in build.rs | Git symlinks broken — see [`../../CLAUDE.md`](../../CLAUDE.md) symlink fix     |
+| Phase 3 verify fails                           | Ensure validator ran long enough (~20 slots) before Ctrl-C                     |
+| GPU sigverify drops PQ txs                     | Use default `solana-test-validator` (GPU off); don't enable perf-libs GPU path |
 
 ---
 
 ## Related documents
 
-| Document | Purpose |
-|----------|---------|
-| [`ml-dsa-migration-status.md`](./ml-dsa-migration-status.md) | Management summary: done vs remaining |
-| [`ml-dsa-explorer-roadmap.md`](./ml-dsa-explorer-roadmap.md) | Block explorer plan |
-| [`ml-dsa-migration.md`](./ml-dsa-migration.md) | Full technical migration strategy |
-| [`../CLAUDE.md`](../CLAUDE.md) | Engineering build/environment notes |
+| Document                                       | Purpose                                              |
+| ---------------------------------------------- | ---------------------------------------------------- |
+| [`overview.md`](./overview.md)                 | Status, progress, roadmap (management)               |
+| [`implementation.md`](./implementation.md)     | Per-phase engineering detail (files, flags, caveats) |
+| [`strategy.md`](./strategy.md)                 | Technical migration strategy & design                |
+| [`explorer-roadmap.md`](./explorer-roadmap.md) | Block explorer plan                                  |
+| [`../../CLAUDE.md`](../../CLAUDE.md)           | Engineering build/environment notes                  |

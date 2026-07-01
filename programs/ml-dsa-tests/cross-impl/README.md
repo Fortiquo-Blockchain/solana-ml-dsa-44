@@ -2,18 +2,18 @@
 
 This locks down the claim the fork rests on: our signatures really are **NIST
 FIPS 204 (ML-DSA-44)**, and our Rust validator and JS wallet stack produce
-**identical bytes**. It closes the open High risk in `docs/ml-dsa-migration.md`
+**identical bytes**. It closes the open High risk in `docs/ml-dsa-44/strategy.md`
 §8 ("must match the reference implementation exactly").
 
 ## Pieces
 
-| File | Side | What it pins |
-|---|---|---|
-| `../tests/vectors/ml_dsa_44_kat.json` | shared | NIST ACVP answer-key excerpt (keygen, sigGen, sigVer) |
-| `../tests/fips204_vectors.rs` | Rust (`fips204`) | keygen on our `MlDsaKeypair` API + sign/verify on the `fips204` core, all vs NIST; our external sign round-trip; interop vs the JS signature |
-| `check_vectors.mjs` | JS (`@noble/post-quantum`) | keygen vs NIST; emits the deterministic external signature the Rust interop check consumes |
-| `../tests/vectors/cross_impl_external.json` | shared (generated) | the JS-produced external signature artifact |
-| `gen_fixture.py` | provenance | regenerates the NIST fixture from `fips204`'s vendored vectors |
+| File                                        | Side                       | What it pins                                                                                                                                 |
+| ------------------------------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `../tests/vectors/ml_dsa_44_kat.json`       | shared                     | NIST ACVP answer-key excerpt (keygen, sigGen, sigVer)                                                                                        |
+| `../tests/fips204_vectors.rs`               | Rust (`fips204`)           | keygen on our `MlDsaKeypair` API + sign/verify on the `fips204` core, all vs NIST; our external sign round-trip; interop vs the JS signature |
+| `check_vectors.mjs`                         | JS (`@noble/post-quantum`) | keygen vs NIST; emits the deterministic external signature the Rust interop check consumes                                                   |
+| `../tests/vectors/cross_impl_external.json` | shared (generated)         | the JS-produced external signature artifact                                                                                                  |
+| `gen_fixture.py`                            | provenance                 | regenerates the NIST fixture from `fips204`'s vendored vectors                                                                               |
 
 ## Key facts the design hinges on
 
