@@ -127,6 +127,7 @@ impl MlDsaKeypair {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<dyn error::Error>> {
+        use fips204::{ml_dsa_44::PublicKey, traits::Verifier};
         if bytes.len() != ML_DSA_KEYPAIR_FILE_BYTES {
             return Err(format!(
                 "expected {ML_DSA_KEYPAIR_FILE_BYTES}-byte ML-DSA keypair, got {}",
@@ -138,8 +139,26 @@ impl MlDsaKeypair {
         let secret_bytes: [u8; SK_LEN] = bytes[PK_LEN..].try_into()?;
         // Validate both halves parse, so a corrupt public half can never later
         // surface as a mere "verification failed" in [`Self::verify`].
-        PrivateKey::try_from_bytes(secret_bytes).map_err(|e| e.to_string())?;
-        fips204::ml_dsa_44::PublicKey::try_from_bytes(public_bytes).map_err(|e| e.to_string())?;
+        let secret = PrivateKey::try_from_bytes(secret_bytes).map_err(|e| e.to_string())?;
+        let public = PublicKey::try_from_bytes(public_bytes).map_err(|e| e.to_string())?;
+        // Cross-check that the two halves are a MATCHING pair, not merely
+        // individually well-formed: sign a fixed probe with the secret key and
+        // verify it under the public key. Without this, a corrupted or
+        // hand-spliced file (one key's public half beside another key's secret
+        // half) would deserialize into a keypair whose address (= sha256(public))
+        // does not correspond to what the secret actually signs for — an
+        // address/signing-key mismatch that would otherwise surface only later,
+        // as an opaque downstream "verification failed". Keypair files are read
+        // rarely (CLI / validator startup), so this extra sign+verify is not on
+        // any hot path.
+        let probe = b"ml-dsa-44 keypair integrity probe";
+        let probe_sig = secret.try_sign(probe, &[]).map_err(|e| e.to_string())?;
+        if !public.verify(probe, &probe_sig, &[]) {
+            return Err(
+                "ML-DSA-44 keypair integrity check failed: public and secret halves do not match"
+                    .into(),
+            );
+        }
         Ok(Self::from_parts(public_bytes, secret_bytes))
     }
 }
@@ -221,6 +240,22 @@ mod tests {
         let restored = MlDsaKeypair::from_bytes(&bytes).unwrap();
         assert_eq!(restored.address(), kp.address());
         assert_eq!(restored.public_key_bytes(), kp.public_key_bytes());
+    }
+
+    #[test]
+    fn test_from_bytes_rejects_mismatched_halves() {
+        // EPIC1-1 review (deserialization integrity): a file that pairs one
+        // key's public half with a different key's secret half must be rejected,
+        // not silently accepted as a keypair whose address (= sha256(public))
+        // does not match what its secret signs for.
+        let a = MlDsaKeypair::new().unwrap();
+        let b = MlDsaKeypair::new().unwrap();
+        let mut spliced = [0u8; ML_DSA_KEYPAIR_FILE_BYTES];
+        spliced[..PK_LEN].copy_from_slice(a.public_key_bytes());
+        spliced[PK_LEN..].copy_from_slice(&b.to_bytes()[PK_LEN..]);
+        assert!(MlDsaKeypair::from_bytes(&spliced).is_err());
+        // A genuine, matching keypair still deserializes cleanly.
+        assert!(MlDsaKeypair::from_bytes(&a.to_bytes()).is_ok());
     }
 
     #[test]
