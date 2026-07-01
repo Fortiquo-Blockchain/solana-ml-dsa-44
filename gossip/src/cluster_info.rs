@@ -124,7 +124,11 @@ const PUSH_MESSAGE_MAX_PAYLOAD_SIZE: usize = PACKET_DATA_SIZE - 44;
 /// of slack. Upstream reserved 115 for a bare 64-byte Signature; the ML-DSA
 /// CrdsSignature enum adds a 4-byte discriminant, so the reserve grew by 4.
 /// Guarded by `test_duplicate_shred_max_payload_size` (which serializes a full
-/// max-size chunk and asserts it fits), so this can never silently drift.
+/// max-size chunk and asserts it fits), so this can never silently drift. NOTE:
+/// this reserve — and that guard test, which signs Ed25519 — assume duplicate-
+/// shred crds values are Ed25519-signed (as they are today). If they are ever
+/// ML-DSA-signed, the `CrdsSignature::MlDsa` variant is ~3.7 KB (not 68 bytes),
+/// so both this constant and the guard test must be revisited.
 pub(crate) const DUPLICATE_SHRED_MAX_PAYLOAD_SIZE: usize = PACKET_DATA_SIZE - 119;
 /// Maximum number of hashes in AccountsHashes a node publishes
 /// such that the serialized size of the push/pull message stays below
@@ -3460,15 +3464,25 @@ mod tests {
             let prune_data =
                 PruneData::new_rand(&mut rng, &self_keypair, Some(MAX_PRUNE_DATA_NODES));
             let prune_message = Protocol::PruneMessage(self_keypair.pubkey(), prune_data);
+            // Upstream asserted MAX_PRUNE_DATA_NODES was the *largest* count that
+            // fits a packet (MAX_PRUNE_DATA_NODES + 1 would not). The fork raised
+            // PACKET_DATA_SIZE to 8192, so 33+ now fit and that maximality check
+            // is gone; 32 is a deliberate cap (see the constant), not packet-
+            // maximal. Guard the cap instead with a documented margin: a
+            // MAX_PRUNE_DATA_NODES prune message must fit comfortably inside a
+            // packet (< half). This measured-size check (unlike a bare
+            // Packet::from_data fits-check) fails loudly if the cap is bumped
+            // toward the packet limit or PruneData's wire size balloons, rather
+            // than only at the boundary.
+            let size = serialized_size(&prune_message).unwrap() as usize;
+            assert!(
+                size * 2 < PACKET_DATA_SIZE,
+                "MAX_PRUNE_DATA_NODES prune message is {size} B, not < half of \
+                 PACKET_DATA_SIZE ({PACKET_DATA_SIZE})"
+            );
             let socket = new_rand_socket_addr(&mut rng);
             assert!(Packet::from_data(Some(&socket), prune_message).is_ok());
         }
-        // Upstream additionally asserted that MAX_PRUNE_DATA_NODES was the
-        // *largest* count that fits a packet (that MAX_PRUNE_DATA_NODES + 1 would
-        // not). The fork raised PACKET_DATA_SIZE to 8192, so 33+ now fit as well;
-        // 32 is a deliberate cap (see the constant), not packet-maximal, so that
-        // maximality assertion is intentionally dropped. The loop above still
-        // guards the safety invariant that MAX_PRUNE_DATA_NODES fits in a packet.
     }
 
     #[test]

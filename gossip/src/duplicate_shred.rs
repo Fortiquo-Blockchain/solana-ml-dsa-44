@@ -844,16 +844,20 @@ pub(crate) mod tests {
             merkle_variant,
         );
 
-        // Precondition: the sets must have >=2 coding shreds each and differing
-        // erasure configs. Asserted loudly so a future packet-size change fails
+        // Precondition: the base set is non-empty (indexed [0]), bigger/smaller
+        // have >=2 (indexed [1]), and the three erasure configs differ. Differing
+        // coding-shred counts is a valid proxy for differing erasure meta only
+        // while every set stays within a single FEC block (<32 data shreds, true
+        // at these counts). Asserted loudly so a future packet-size change fails
         // here instead of with a confusing InvalidErasureMetaConflict below.
         assert!(
-            coding_shreds_bigger.len() >= 2
+            !coding_shreds.is_empty()
+                && coding_shreds_bigger.len() >= 2
                 && coding_shreds_smaller.len() >= 2
                 && coding_shreds.len() != coding_shreds_bigger.len()
                 && coding_shreds.len() != coding_shreds_smaller.len(),
-            "coding sets need >=2 shreds and differing erasure configs \
-             (got {}, {}, {}); bump entry counts for this packet size",
+            "coding sets need base>=1, bigger/smaller>=2, and differing erasure \
+             configs (got {}, {}, {}); bump entry counts for this packet size",
             coding_shreds.len(),
             coding_shreds_bigger.len(),
             coding_shreds_smaller.len(),
