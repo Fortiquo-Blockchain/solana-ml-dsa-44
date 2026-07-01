@@ -348,21 +348,25 @@ mod test {
             16, // fec_set_index
         );
         assert_matches!(shred.sanitize(), Ok(()));
-        // Corrupt shred by making it too large
+        // Corrupt shred by making it too large. Sizes derive from the fork's
+        // legacy payload (SIZE_OF_PAYLOAD = 8188, CAPACITY = 8011) so these
+        // assertions track PACKET_DATA_SIZE instead of hardcoding it.
         {
             let mut shred = shred.clone();
             shred.payload.push(10u8);
-            assert_matches!(shred.sanitize(), Err(Error::InvalidPayloadSize(1229)));
+            assert_matches!(
+                shred.sanitize(),
+                Err(Error::InvalidPayloadSize(size)) if size == ShredData::SIZE_OF_PAYLOAD + 1
+            );
         }
         {
             let mut shred = shred.clone();
             shred.data_header.size += 1;
             assert_matches!(
                 shred.sanitize(),
-                Err(Error::InvalidDataSize {
-                    size: 1140,
-                    payload: 1228,
-                })
+                Err(Error::InvalidDataSize { size, payload })
+                    if size == (SIZE_OF_DATA_SHRED_HEADERS + ShredData::CAPACITY) as u16 + 1
+                        && payload == ShredData::SIZE_OF_PAYLOAD
             );
         }
         {
@@ -370,10 +374,8 @@ mod test {
             shred.data_header.size = 0;
             assert_matches!(
                 shred.sanitize(),
-                Err(Error::InvalidDataSize {
-                    size: 0,
-                    payload: 1228,
-                })
+                Err(Error::InvalidDataSize { size: 0, payload })
+                    if payload == ShredData::SIZE_OF_PAYLOAD
             );
         }
         {
@@ -398,10 +400,9 @@ mod test {
             shred.data_header.size = shred.payload().len() as u16 + 1;
             assert_matches!(
                 shred.sanitize(),
-                Err(Error::InvalidDataSize {
-                    size: 1229,
-                    payload: 1228,
-                })
+                Err(Error::InvalidDataSize { size, payload })
+                    if size == ShredData::SIZE_OF_PAYLOAD as u16 + 1
+                        && payload == ShredData::SIZE_OF_PAYLOAD
             );
         }
     }

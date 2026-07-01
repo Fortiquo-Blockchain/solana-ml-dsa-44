@@ -1893,10 +1893,7 @@ mod tests {
     #[test]
     fn test_serde_compat_shred_data() {
         const SEED: &str = "6qG9NGWEtoTugS4Zgs46u8zTccEJuRHtrNMiUayLHCxt";
-        const PAYLOAD: &str = "hNX8YgJCQwSFGJkZ6qZLiepwPjpctC9UCsMD1SNNQurBXv\
-        rm7KKfLmPRMM9CpWHt6MsJuEWpDXLGwH9qdziJzGKhBMfYH63avcchjdaUiMqzVip7cUD\
-        kqZ9zZJMrHCCUDnxxKMupsJWKroUSjKeo7hrug2KfHah85VckXpRna4R9QpH7tf2WVBTD\
-        M4m3EerctsEQs8eZaTRxzTVkhtJYdNf74KZbH58dc3Yn2qUxF1mexWoPS6L5oZBatx";
+        const PAYLOAD: &str = "kgZTUXqp4FLRRxtFyctUiJuF2WNSL56YVaoGTaWANX93kexxgn3svwA61BvAyb8QUnepMhTU5tSDcnZ2pNfPHBTfcjFuna5M4MfJDRAmhZGfTh3HdbXNJgeA";
         let mut rng = {
             let seed = <[u8; 32]>::try_from(bs58_decode(SEED)).unwrap();
             ChaChaRng::from_seed(seed)
@@ -1936,9 +1933,7 @@ mod tests {
     #[test]
     fn test_serde_compat_shred_data_empty() {
         const SEED: &str = "E3M5hm8yAEB7iPhQxFypAkLqxNeZCTuGBDMa8Jdrghoo";
-        const PAYLOAD: &str = "nRNFVBEsV9FEM5KfmsCXJsgELRSkCV55drTavdy5aZPnsp\
-        B8WvsgY99ZuNHDnwkrqe6Lx7ARVmercwugR5HwDcLA9ivKMypk9PNucDPLs67TXWy6k9R\
-        ozKmy";
+        const PAYLOAD: &str = "2zn1cahJSixH2p7nSCKkAEgfzZM7KBVcLsjrHMqzgcGmzkdr9Mrs4YZbqzSRHX7U7iV5EvUw7AfwPXnpqnpUVunTiVSs2DXydr4JmW7ZhdcX82kY98Sv3C6oh";
         let mut rng = {
             let seed = <[u8; 32]>::try_from(bs58_decode(SEED)).unwrap();
             ChaChaRng::from_seed(seed)
@@ -1971,10 +1966,7 @@ mod tests {
     #[test]
     fn test_serde_compat_shred_code() {
         const SEED: &str = "4jfjh3UZVyaEgvyG9oQmNyFY9yHDmbeH9eUhnBKkrcrN";
-        const PAYLOAD: &str = "3xGsXwzkPpLFuKwbbfKMUxt1B6VqQPzbvvAkxRNCX9kNEP\
-        sa2VifwGBtFuNm3CWXdmQizDz5vJjDHu6ZqqaBCSfrHurag87qAXwTtjNPhZzKEew5pLc\
-        aY6cooiAch2vpfixNYSDjnirozje5cmUtGuYs1asXwsAKSN3QdWHz3XGParWkZeUMAzRV\
-        1UPEDZ7vETKbxeNixKbzZzo47Lakh3C35hS74ocfj23CWoW1JpkETkXjUpXcfcv6cS";
+        const PAYLOAD: &str = "6RK3AD8T1gKrhHFj2QsPyZoDREHMXFr8zmszUpvQXkJbokJkh1jPMnEx42vHfs1p4xRdoGXZpnfiksU6ELszgPF25BGtr7u1PEEw1FmXXLBedpj2YxyCtdLU2b";
         let mut rng = {
             let seed = <[u8; 32]>::try_from(bs58_decode(SEED)).unwrap();
             ChaChaRng::from_seed(seed)

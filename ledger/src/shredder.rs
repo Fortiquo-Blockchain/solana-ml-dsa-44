@@ -1152,7 +1152,9 @@ mod tests {
         let version = shred_version::version_from_hash(&hash);
         assert_ne!(version, 0);
         let shredder = Shredder::new(0, 0, 0, version).unwrap();
-        let entries: Vec<_> = (0..500)
+        // fork: scaled up from 500 so 8192-byte shreds still span multiple FEC
+        // sets (each in [32, 64) data shreds), as they did at PACKET_DATA_SIZE=1232.
+        let entries: Vec<_> = (0..4000)
             .map(|_| {
                 let keypair0 = Keypair::new();
                 let keypair1 = Keypair::new();
