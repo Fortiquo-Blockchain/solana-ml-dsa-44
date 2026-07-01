@@ -290,18 +290,36 @@ Defer until PQ load actually matters.
 This is the highest-leverage next step because it _unblocks the testing_ for
 everything else (§7.1, B4).
 
-- **Stand up a multi-node harness.** `multinode-demo/*` boots an Ed25519
-  cluster; adapt it to pass the `--ml-dsa-vote` / `--ml-dsa-shred` flags and PQ
-  vote authorities to each validator. This is where §4.2/§4.3/§4.4 finally get
-  observed.
+- **Stand up a multi-node harness — get plain Ed25519 rooting _first_.**
+  `multinode-demo/*` boots an Ed25519 cluster; before adding any ML-DSA, confirm
+  an N≥2 cluster reliably produces roots with **proper genesis stakes** and
+  realistic vote pacing (~one vote/slot). Only then adapt it to pass
+  `--ml-dsa-vote` / `--ml-dsa-shred` and PQ vote authorities to each validator.
+  This is where §4.2/§4.3/§4.4 finally get observed.
 - **Make PQ votes gossip-observable.** Today they ride UDP TPU only
   (`voting_service.rs` `VoteOp::PushMlDsaVote` → `send_transaction_raw`), so
   peers see them only via block replay. Decide whether that's acceptable for a
   cluster or whether votes should also propagate via a CRDS value (needs the 2b
   path + likely §7.1 for a PQ-signed identity).
 - **Exercise CRDS at N>2.** Confirm PQ `CrdsValue`s propagate under real
-  pull/push, measure packing (~3 PQ values/packet), and re-check the N=2
-  finickiness (stake-weighted votes) at scale.
+  pull/push, measure packing (~3 PQ values/packet).
+
+**⚠️ The N=2 `LocalCluster` stall is NOT the ML-DSA work** (investigated
+2026-07, two independent code passes). A 2-node cluster stalls at root 1 with
+`push_vote failed: InsertFailed`; the cause is inherent Solana gossip at small
+N, **not** the `CrdsSignature` enum (verified: `signable_data = serialize(&data)`
+is unchanged and `par_verify` at `cluster_info.rs:312`/`:326` accepts Ed25519
+votes in an all-fork cluster). Two mechanisms: **(a)** Vote CRDS override is
+purely wallclock-based (`crds.rs:194`); a fresh vote stamped `now = timestamp()`
+(ms; `push_vote_at_index` `:1076`) fails to override the prior vote at a recycled
+index when the clock has not advanced — upstream's own test sleeps 1 ms to dodge
+this (`cluster_info.rs:3810`), and WSL's non-monotonic clock makes it bite.
+**(b)** At genesis/root-1 the root-bank stakes are empty/zero, so `crds.trim`
+returns `UnknownStakes` (`crds.rs:645`; TODO at `cluster_info.rs:1813`) and the
+stake-weighted push active set degenerates (`push_active_set.rs:38`). So the fix
+lives in **genesis stakes + vote pacing + a monotonic clock (not WSL)**, or a
+code change (wallclock jitter) — never the enum. Which mechanism dominates live,
+and when stakes populate, need a build/run to pin down.
 
 **Effort:** medium — mostly harness + observation, minimal new crypto. Highest
 priority.
