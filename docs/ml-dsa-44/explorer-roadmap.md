@@ -65,8 +65,8 @@ transactions without significant modification.
 | Transaction size  | ~1 KB max                | Up to ~4 KB                                             |
 | Signature display | 64-byte Ed25519          | 2,420-byte ML-DSA **or** 64-byte Ed25519                |
 | Signer address    | Same as public key       | Address = hash of 1,312-byte PQ public key              |
-| Transaction ID    | Ed25519 signature bytes  | Synthetic 64-byte ID (not a real Ed25519 sig)           |
-| PQ detection      | N/A                      | Transactions starting with `0x00` marker byte           |
+| Transaction ID    | Ed25519 signature bytes  | Placeholder 64-byte ID (not a real Ed25519 sig)         |
+| PQ detection      | N/A                      | Transactions whose last instruction is the ML-DSA carrier precompile |
 | Validator votes   | Standard                 | May use `--ml-dsa-vote` PQ authority                    |
 | Block shreds      | Not shown                | Optional advanced view for `--ml-dsa-shred` attestation |
 
@@ -168,8 +168,8 @@ Our indexer must detect and decode two transaction types:
 
 | Type                 | Detection           | Decoder source in repo          |
 | -------------------- | ------------------- | ------------------------------- |
-| **Ed25519** (legacy) | First byte ≠ `0x00` | Standard Solana libraries       |
-| **ML-DSA** (PQ)      | First byte = `0x00` | `sdk/src/ml_dsa_transaction.rs` |
+| **Ed25519** (legacy) | No ML-DSA carrier instruction        | Standard Solana libraries    |
+| **ML-DSA** (PQ)      | Last instruction is the ML-DSA precompile carrier | `sdk/src/ml_dsa_envelope.rs` |
 
 For PQ transactions the indexer must:
 

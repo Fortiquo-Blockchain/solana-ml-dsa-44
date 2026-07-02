@@ -22,8 +22,8 @@ the fork-specific wire terms follow.
 
 | Term                          | Meaning                                                                                                                                               |
 | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`0x00` marker**             | Lead byte tagging a Phase-1 ML-DSA transaction; a stock Ed25519 tx starts with a signature count ≥ 1.                                                 |
-| **Synthetic tx id**           | The 64-byte transaction id for an ML-DSA tx = `sha256(sigs)‖sha256(msg)` (a 2,420-byte signature can't be the id the runtime keys on).                |
+| **Envelope carrier**          | A Phase-0 ML-DSA precompile instruction appended (as the last instruction) to an otherwise-ordinary transaction, carrying the ML-DSA `[pubkey ‖ signature]` proof so a signer is authorized post-quantum and re-verified on every peer's block replay (`sdk/src/ml_dsa_envelope.rs`). Replaced the earlier `0x00`/`MlDsaTransaction` wire format. |
+| **Placeholder / synthetic tx id** | The 64-byte id an ML-DSA envelope tx uses as its signature slot = `sha256(sig)‖sha256(signed_bytes)` (a 2,420-byte signature can't be the id the runtime keys on); it is an identifier, not a verifiable signature.                |
 | **Commitment** (Phase 3)      | `sha256(leader ML-DSA pubkey)`, 32 B, embedded inside the Ed25519-signed Merkle region of a shred.                                                    |
 | **Trailer** (Phase 3)         | `[pubkey 1312 ‖ signature 2420]` = 3,732 B carried after the Merkle proof (not Ed25519-signed, not erasure-coded).                                    |
 | **Advisory vs strict**        | Phase-3 shred verify is _advisory_ (telemetry only) by default; `--ml-dsa-shred-strict` makes it _gating_ (drops failing PQ shreds).                  |

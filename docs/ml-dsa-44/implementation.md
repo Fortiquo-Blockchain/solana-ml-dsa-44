@@ -10,9 +10,9 @@
 > [`remaining-work.md`](./remaining-work.md); for how to build/run/test see
 > [`runbook.md`](./runbook.md).
 >
-> Every phase below **coexists** with Ed25519 (flag-gated or
-> `0x00`-marker-tagged), so a single-node validator never stalls — the
-> post-quantum paths are additive.
+> Every phase below **coexists** with Ed25519 (flag-gated, or additive via an
+> ML-DSA carrier precompile instruction), so a single-node validator never stalls
+> — the post-quantum paths are additive.
 
 ---
 
@@ -77,34 +77,42 @@ ML-DSA precompile tx (confirms) and a tampered one (rejected). Commands:
 
 Building on Phase 0, **user-payment transactions can be signed with ML-DSA-44
 instead of Ed25519** — the fee payer's signature _and_ address are post-quantum.
-This **coexists** with the Ed25519 path (a `0x00` lead byte marks an ML-DSA
-transaction; everything else stays Ed25519), so the validator's own
-votes/gossip/shreds keep running and the node keeps producing blocks. It is
-**not** an exclusive cutover — that would require Phases 2–3.
+This **coexists** with the Ed25519 path (an ML-DSA transaction is an ordinary
+transaction that additionally carries an ML-DSA carrier precompile instruction;
+everything else stays Ed25519), so the validator's own votes/gossip/shreds keep
+running and the node keeps producing blocks. It is **not** an exclusive cutover.
 
 - **Address:** `address = sha256(ml_dsa_public_key)` (32 bytes ⇒ accounts-db /
   PDAs / base58 unchanged). `MlDsaKeypair` + helper in
   `sdk/src/ml_dsa_keypair.rs`.
-- **New tx format** (`sdk/src/ml_dsa_transaction.rs`):
-  `[0x00][sig count][2420-B ML-DSA sigs][pubkey count][1312-B signer pubkeys][bincode(Message)]`.
-  The 64-byte tx **id** is a synthetic `sha256(sigs)‖sha256(msg)` (the runtime
-  keys on a 64-byte `Signature`; a 2420-B sig can't be one). Verification =
-  ML-DSA sig **and** `sha256(pubkey)==account_keys[i]`.
-- **Validator intercepts:** `perf/src/sigverify.rs` CPU-verifies `0x00` packets;
-  `core/src/banking_stage/immutable_deserialized_packet.rs` bridges them for
-  execution; `rpc/src/rpc.rs` `sendTransaction` runs the ML-DSA preflight and
-  forwards the raw bytes. Ed25519/GPU paths untouched.
+- **Wire format — replay-safe envelope carrier** (`sdk/src/ml_dsa_envelope.rs`):
+  a standard `Transaction`/`VersionedTransaction` whose sole signer (the ML-DSA
+  address) has a deterministic **placeholder** signature and whose **last**
+  instruction is the Phase-0 ML-DSA **precompile**, embedding
+  `[pubkey ‖ signature ‖ signed_bytes]` where `signed_bytes` is the serialized
+  _core_ message (every instruction except the carrier). Verification
+  (`verify_ml_dsa_envelope`) enforces `sha256(pubkey)==signer`, the ML-DSA
+  signature, and — the anti-lift check — that the rebuilt core message equals
+  `signed_bytes`, binding the proof to this exact transaction. Because the proof
+  rides _inside_ the transaction, it survives into the block and is re-verified on
+  every node (including a peer's **block replay**). This **replaced** the earlier
+  `0x00`/`MlDsaTransaction` format, whose proof was dropped after TPU sigverify
+  and so failed multi-node replay (see Phase 2 and
+  [`pq-tx-replay-fix-plan.md`](./pq-tx-replay-fix-plan.md)).
+- **Verification chokepoints (all node-uniform):** `perf/src/sigverify.rs`
+  (`verify_packet` → `verify_ml_dsa_envelope_packet`) at TPU ingress; the
+  `verify_and_hash_message` / `SanitizedTransaction::verify` fallbacks on replay
+  and in the RPC preflight; and `verify_precompiles` alongside. An envelope tx is
+  an ordinary transaction, so banking, blockstore, and RPC need no special bridge.
 - **Scope:** one required signer (fee payer), legacy `Message` only (multi-sig /
-  v0 / lookup-tables rejected at decode).
-- **Caveats (Phase-1 PoC):** ML-DSA verification runs on the **CPU sigverify
-  path** — if perf-libs/GPU is loaded, `0x00` packets are _dropped_
-  (fail-closed) on the GPU path, so run with GPU sigverify disabled (the default
-  for `solana-test-validator`). The RPC preflight for ML-DSA runs the same
-  **health check + `simulate_transaction`** as the Ed25519 path (the ML-DSA
-  signature + address-binding check stands in for `verify_transaction`, since
-  the synthetic 64-byte id is not an Ed25519 signature), so a
-  stale-blockhash/underfunded tx is rejected at `sendTransaction` — parity with
-  Ed25519. `rpc/src/rpc.rs` `test_rpc_send_transaction_preflight` covers it.
+  v0 / lookup-tables out of scope).
+- **Caveats:** ML-DSA verification runs on the **CPU sigverify path**; envelope
+  packets have no cheap GPU-diversion marker, so run with GPU sigverify disabled
+  (the default for `solana-test-validator`) — see B2. `no runtime feature gate`:
+  all nodes must be upgraded together. The RPC preflight runs the normal
+  verify + health + `simulate_transaction` path (envelope tx verifies via the
+  `SanitizedTransaction::verify` fallback), so a stale-blockhash/underfunded tx is
+  rejected at `sendTransaction`; `test_rpc_send_transaction_preflight` covers it.
 
 Commands: [`runbook.md`](./runbook.md) Phase 1.
 
@@ -122,22 +130,24 @@ Ed25519.
 - **Single-signer fit:** a vote needs exactly one signer when the ML-DSA voter
   is _both_ the fee payer _and_ the authorized voter (`to_vote_instruction`
   makes the authorized voter the signer, not the vote account) ⇒
-  `num_required_signatures == 1`, which is exactly what `MlDsaTransaction::sign`
-  accepts. No multi-signer extension needed.
+  `num_required_signatures == 1`, which is exactly what the single-signer
+  envelope path (`ml_dsa_envelope::sign_ml_dsa_transaction`) accepts.
 - **Vote construction** (`core/src/replay_stage.rs`, `generate_vote_tx`): when
   `ml_dsa_voter` is set and it equals the vote account's authorized voter, build
-  the vote instruction with the ML-DSA address as payer+authority, wrap it as a
-  Phase 1 `0x00` `MlDsaTransaction`, and return a new
-  `GenerateVoteTxResult::MlDsaTx(wire, blockhash)`. Tower save /
-  `vote_signatures` (synthetic ids) are unchanged. Emits a per-vote
+  the vote instruction with the ML-DSA address as payer+authority, sign it via
+  the replay-safe envelope carrier (`sign_ml_dsa_transaction`), and return a new
+  `GenerateVoteTxResult::MlDsaTx(wire, blockhash)` (`wire` = bincoded
+  `VersionedTransaction`). Tower save / `vote_signatures` (the placeholder ids)
+  are unchanged. Emits a per-vote
   `info!("Signed ML-DSA-44 … vote …")`.
 - **Routing** (`core/src/voting_service.rs` + `gossip/src/cluster_info.rs`): new
   `VoteOp::{Push,Refresh}MlDsaVote{wire,…}` submit the raw bytes via
   `cluster_info.send_transaction_raw(&wire, None)` to the node's **own regular
-  TPU** — **never** the vote-only port (Phase 1 sigverify rejects `0x00` there)
-  nor gossip CRDS (typed to Ed25519 `Transaction`). From there it rides the
-  Phase 1 regular-path sigverify → banking `new_ml_dsa` bridge → the vote
-  instruction executes and updates the vote account.
+  TPU** — **never** the vote-only port (its `reject_non_vote` sigverify disables
+  the envelope fallback, and a 2-instruction carrier tx is not a simple vote) nor
+  gossip CRDS (typed to Ed25519 `Transaction`). From there it rides the regular
+  sigverify (`verify_ml_dsa_envelope_packet`) → banking (an ordinary tx, no
+  special bridge) → the vote instruction executes and updates the vote account.
 - **Plumbing:** `ml_dsa_voter: Option<Arc<MlDsaKeypair>>` is carried on
   `ValidatorConfig` → `Tvu::new` → `ReplayStageConfig` (`None` everywhere else;
   `safe_clone_config` updated). `solana-test-validator` gets a

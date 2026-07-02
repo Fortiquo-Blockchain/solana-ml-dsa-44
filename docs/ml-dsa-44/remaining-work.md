@@ -51,7 +51,7 @@ about **hardening, multi-node, and the one surface that is only partially done
 |  Phase | Surface                             | Flag / entry point                           | Status                       | Test level                                      |
 | -----: | ----------------------------------- | -------------------------------------------- | ---------------------------- | ----------------------------------------------- |
 |  **0** | App-level verify (precompile)       | program id `6Cjqvizo…VbNSs`, `feature: None` | ✅ Done                      | unit + integration + FIPS-204 KAT + live RPC    |
-|  **1** | User payments                       | `0x00` tx marker (`ML_DSA_TX_MARKER`)        | ✅ Done                      | unit + bank-exec + live RPC                     |
+|  **1** | User payments                       | ML-DSA carrier precompile (envelope)         | ✅ Done                      | unit + bank-exec + live RPC + N=2 replay        |
 | **2a** | Validator votes                     | `--ml-dsa-vote <KEYFILE>`                    | ✅ Done                      | unit + **N=2 multi-node finalizes** (replay-safe envelope carrier; see [`pq-tx-replay-fix-plan.md`](./pq-tx-replay-fix-plan.md)) |
 | **2b** | Node-to-node gossip (CRDS)          | `CrdsSignature` enum                         | ✅ **Core** done             | unit + **2-node** live wire                     |
 |  **3** | Block broadcasting (shreds/turbine) | `--ml-dsa-shred[-strict]`                    | ✅ Done (additive)           | unit + **N=2 strict turbine** peer-verify + offline verify |
@@ -74,7 +74,7 @@ _pending_ discussion:
 
 | Term                   | Meaning                                                                                               |
 | ---------------------- | ----------------------------------------------------------------------------------------------------- |
-| **`0x00` marker**      | Lead byte tagging a Phase-1 ML-DSA transaction; a stock tx starts with a signature count ≥ 1.         |
+| **Envelope carrier**   | A Phase-0 ML-DSA precompile instruction appended to a transaction that carries the ML-DSA proof, so a signer is authorized post-quantum (`ml_dsa_envelope`). Replaced the old `0x00` wire format. |
 | **Commitment** (P3)    | `sha256(leader ML-DSA pubkey)`, 32 B, inside the Ed25519-signed Merkle region of a shred.             |
 | **Trailer** (P3)       | `[pubkey 1312 ‖ sig 2420]` = 3732 B after the Merkle proof (not Ed25519-signed, not erasure-coded).   |
 | **Advisory vs strict** | Phase-3 shred verify is _advisory_ (telemetry) by default; `--ml-dsa-shred-strict` makes it _gating_. |
@@ -90,8 +90,8 @@ should not be fixed on this fork).
 | #   | Blocker                                                                                                                                                          | Impact                                                                                                               | Verdict                                                    |
 | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | B1  | **Node identity is still Ed25519** (QUIC/TLS X.509 cert is Ed25519-keyed). Can't flip `id()` to the ML-DSA address without partitioning from turbine/repair/TPU. | The node authenticates itself to peers with Ed25519. The "PQ validator" is PQ in its _payloads_, not its _identity_. | **Fixable → §7.1** (large: TLS + ping/pong/prune)          |
-| B2  | **No GPU/CUDA path for ML-DSA.** Any batch containing a `0x00`/ml_dsa packet falls back to CPU sigverify.                                                        | Throughput of PQ traffic is CPU-bound. Fine for a demo; a bottleneck at load.                                        | **Fixable → §7.2** (new CUDA kernel; not on critical path) |
-| B3  | **Multi-node PQ propagation — votes now FIXED; remainder open.** PQ **votes** finalize across an N=2 cluster (replay-safe ML-DSA envelope carrier — the vote tx carries its proof as a precompile instruction, re-verified on every peer's replay). PQ **shreds** (strict turbine) also verified at N=2. _Still open:_ CRDS behavior at N>2 (§4.2), and PQ **user payments** still ride the old `0x00` path (same latent replay issue until migrated to the envelope). | Votes + shreds work multi-node; payments and N>2 gossip are unproven. | **Votes done** ([`pq-tx-replay-fix-plan.md`](./pq-tx-replay-fix-plan.md)); rest **Fixable → §7.3** |
+| B2  | **No GPU/CUDA path for ML-DSA.** ML-DSA (envelope) packets are CPU-only; a perf-libs/GPU node drops them at ingress (no cheap marker to divert). Run with GPU sigverify off.                                                        | Throughput of PQ traffic is CPU-bound. Fine for a demo; a bottleneck at load.                                        | **Fixable → §7.2** (new CUDA kernel; not on critical path) |
+| B3  | **Multi-node PQ propagation — votes + payments FIXED; N>2 gossip open.** PQ **votes** and PQ **user payments** both ride the replay-safe ML-DSA envelope carrier (proof in the tx, re-verified on every peer's replay), and PQ **shreds** (strict turbine) verify at N=2. _Still open:_ CRDS behavior at N>2 (§4.2). | Votes, payments, and shreds work multi-node; N>2 gossip is unproven. | **Done** ([`pq-tx-replay-fix-plan.md`](./pq-tx-replay-fix-plan.md)); N>2 **Fixable → §7.3** |
 | B4  | **Shred verify is advisory by default.** ML-DSA shred failures emit metrics but don't drop packets unless `--ml-dsa-shred-strict`.                               | Out of the box, a forged ML-DSA trailer is logged, not rejected.                                                     | **Fixable → §7.5** (flip default once multi-node-proven)   |
 | B5  | **frozen-abi digests changed** (`CrdsValue`, `Protocol`) and are only regenerable under a nightly/specialization build.                                          | Inert on our pinned stable 1.76 — but blocks any move to nightly ABI-checked CI.                                     | **Fixable → §7.4**                                         |
 | B6  | **Phase-1 scope is single-signer, legacy `Message` only.** Multi-sig / v0 / address-lookup-table txs are rejected at decode.                                     | No PQ multi-sig, no versioned transactions.                                                                          | **Fixable → §7.5**                                         |
@@ -120,22 +120,19 @@ proven."
    bidirectional `insert_info`. Larger fan-out, packing (~3 PQ values per
    packet), and pull/push dynamics are unexplored.
 
-3. **The GPU sigverify path — never exercised, and now has a second gap.** For
-   `0x00` packets, `batches_contain_ml_dsa` routes PQ batches to CPU when
-   perf-libs is loaded, but that branch has never run against a real CUDA build
-   (`solana-test-validator` runs GPU sigverify **off**). The replay-safe envelope
-   packets (`solana_sdk::ml_dsa_envelope`) are **worse off**: they have no cheap
-   marker, so `batches_contain_ml_dsa` does not divert them and a GPU node would
-   drop them at ingress. **Run this fork with GPU sigverify off** until the GPU
-   work (B2) adds detection or a kernel. See the caveat on
-   `verify_ml_dsa_envelope_packet`.
+3. **The GPU sigverify path drops PQ packets.** ML-DSA packets are the
+   replay-safe envelope form (`solana_sdk::ml_dsa_envelope`) — ordinary
+   transactions with no cheap marker — so the CUDA `ed25519_verify` kernel
+   mis-parses the placeholder signature and drops them, and nothing diverts them
+   to the CPU (unlike the removed `0x00` path, which `batches_contain_ml_dsa` used
+   to detect). **Run this fork with GPU sigverify off** (the
+   `solana-test-validator` default) until the GPU work (B2) adds detection or an
+   ML-DSA kernel. See the caveat on `verify_ml_dsa_envelope_packet`.
 
-4. **Multi-signer / v0 / address-lookup-table transactions — rejected at
-   decode.** Phase 1 (`sdk/src/ml_dsa_transaction.rs`) accepts exactly one
-   required signer and legacy `Message` only. The replay-safe envelope path
-   (`ml_dsa_envelope`) is likewise single-signer + legacy for now. Anything else
-   errors out — there is no partial support to "test," just a hard boundary to
-   extend.
+4. **Multi-signer / v0 / address-lookup-table transactions — out of scope.** The
+   replay-safe envelope path (`sdk/src/ml_dsa_envelope.rs`) accepts exactly one
+   required signer and legacy `Message` only. Anything else is unsupported — a
+   hard boundary to extend, not partial support to "test."
 
 ---
 
@@ -173,7 +170,7 @@ solana-test-validator --reset --ledger ~/solana-test-ledger-mldsa \
 
 With those flags this one node:
 
-- ✅ **accepts & executes** ML-DSA user transactions (Phase 1) — `0x00` marker,
+- ✅ **accepts & executes** ML-DSA user transactions (Phase 1) — envelope carrier,
   CPU sigverify;
 - ✅ **finalizes** on its own post-quantum consensus **votes** (Phase 2a) —
   authorized voter = ML-DSA address;
@@ -260,17 +257,19 @@ to prove it).
 
 ### 7.2 GPU / CUDA ML-DSA verify _(B2 · off critical path)_
 
-**Where the fallback is.** `perf/src/sigverify.rs`: `ed25519_verify` (line 653)
-calls `batches_contain_ml_dsa` (line 632); if any batch holds a `0x00` packet it
-logs once (`warn_ml_dsa_gpu_fallback_once`), bumps
-`sigverify_ml_dsa_gpu_fallback`, and routes the whole set to
-`ed25519_verify_cpu`. The CUDA `ed25519_verify` kernel's fixed 64-byte offset
-math would mis-parse a 2420-byte signature and silently fail, which is why the
-fallback exists.
+**The gap.** ML-DSA envelope packets (`solana_sdk::ml_dsa_envelope`) are ordinary
+transactions with a placeholder Ed25519 signature; the CUDA `ed25519_verify`
+kernel mis-parses that placeholder and drops them. They are only verified when a
+batch falls to the CPU (`verify_ml_dsa_envelope_packet`), and — unlike the removed
+`0x00` path — there is no cheap marker to force that diversion. So on a
+perf-libs/GPU node PQ packets are dropped at ingress; **run with GPU sigverify
+off** for now.
 
-**Approach.** Write a new CUDA kernel in perf-libs that understands the ML-DSA
-packet layout (2420-B sig, 1312-B key, `sha256(pubkey)==signer` binding) and
-dispatch PQ batches to it instead of the CPU. Large, standalone,
+**Approach.** Either (a) add a cheap structural pre-filter that diverts batches
+containing an ML-DSA carrier to the CPU (mirroring the old `batches_contain_ml_dsa`
+diversion, but the carrier is not a lead byte so detection costs a parse), or
+(b) write a CUDA kernel that understands the carrier-precompile layout (2420-B
+sig, 1312-B key, `sha256(pubkey)==signer` binding). Large, standalone,
 NVIDIA-specific.
 
 **Effort:** comparable to Phase 4, but **not on the critical path** — CPU
@@ -302,14 +301,13 @@ vote-account repoint to the ML-DSA authorized voter + UDP-TPU enable), and
   block and every peer re-verifies it on replay
   (`bank.verify_transaction` → `verify_and_hash_message` → the
   `solana_sdk::ml_dsa_envelope` fallback). `test_mldsa_votes_finalize_cluster`
-  (N=2) now passes: 0 dead slots. Design + constraints:
-  [`pq-tx-replay-fix-plan.md`](./pq-tx-replay-fix-plan.md). **Remaining steps**
-  (steps 3–4 there): migrate PQ **user payments** off `0x00` onto the same
-  envelope path (same latent replay issue), then delete the `0x00` machinery.
+  (N=2) now passes: 0 dead slots. **PQ user payments were migrated onto the same
+  envelope path and the `0x00` `MlDsaTransaction` format + its banking/sigverify/RPC
+  handlers were deleted** (plan steps 3–4 done). Design + constraints:
+  [`pq-tx-replay-fix-plan.md`](./pq-tx-replay-fix-plan.md).
 
 **Still open:**
 
-- **Migrate user payments + delete `0x00`** — see the plan doc steps 3–4.
 - **Make PQ votes gossip-observable** (`voting_service.rs` `VoteOp::PushMlDsaVote`).
   No longer required for finalization (the carrier tx replays fine); still useful
   for optimistic confirmation.
@@ -326,9 +324,9 @@ latent, so no gossip/clock code change is needed here. Caveat: the WSL clock is
 only _monotonic enough_ on `tsc`; on a coarse/non-monotonic clock the latent
 wallclock-override could still bite, so prefer real hardware/VMs for scale runs.
 
-**Effort:** votes are done (the envelope-carrier approach avoided the feared
-block-format change); what remains is mechanical — migrate payments onto the same
-path and delete `0x00` (plan steps 3–4).
+**Effort:** the PQ-transaction work is done (votes + payments on the envelope
+carrier; `0x00` deleted). What remains under §7.3 is the N>2 CRDS exploration and
+the optional gossip-observable votes.
 
 ### 7.4 frozen-abi digest regeneration _(B5 · inert today)_
 
@@ -352,7 +350,7 @@ any ABI-gated CI.
   the default and `--ml-dsa-shred-strict` the no-op / removing the advisory
   mode. Keep advisory as the roll-out safety valve until then.
 - **Multi-signer / v0 / lookup-table transactions (B6).** Extend
-  `sdk/src/ml_dsa_transaction.rs` beyond one required signer and legacy
+  `sdk/src/ml_dsa_envelope.rs` beyond one required signer and legacy
   `Message`. Note the size ceiling: each additional ML-DSA signer adds ~3.7 KB,
   so cap signers per transaction and document the limit (this is the
   "multi-signer balloons" risk in [`strategy.md`](./strategy.md) §8).
@@ -416,8 +414,8 @@ work are cited inline in §3/§4/§7.)
 
 _Last updated for `feat/ml-dsa-44`. Phases 0–3 (+ 2b core) delivered. Multi-node
 (N=2, `LocalCluster`): Ed25519 consensus, PQ **shreds** (strict turbine), and PQ
-**votes** (replay-safe envelope carrier) all finalize across peers. Remaining PQ-tx
-work: migrate user payments off `0x00` + delete `0x00`
-([`pq-tx-replay-fix-plan.md`](./pq-tx-replay-fix-plan.md) steps 3–4). Phase 4 (node
-identity) not started. "Live" throughout means a self-hosted post-quantum network,
-never live public Solana._
+**votes** and PQ **user payments** (both on the replay-safe envelope carrier)
+finalize across peers; the `0x00` `MlDsaTransaction` format is deleted
+([`pq-tx-replay-fix-plan.md`](./pq-tx-replay-fix-plan.md)). Phase 4 (node identity)
+not started. "Live" throughout means a self-hosted post-quantum network, never live
+public Solana._

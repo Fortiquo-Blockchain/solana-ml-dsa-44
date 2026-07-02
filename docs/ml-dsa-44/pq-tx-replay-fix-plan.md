@@ -1,7 +1,8 @@
 # Plan — make post-quantum transactions survive multi-node block replay
 
-> **Status:** Option A **implemented for votes** (steps 1–2); user-payment migration
-> and `0x00` removal (steps 3–4) still pending. Owner of the problem statement:
+> **Status:** Option A **fully implemented** (steps 1–4). Votes and user payments
+> both ride the envelope carrier; the `0x00` `MlDsaTransaction` format and its
+> banking/sigverify/RPC handlers are deleted. Owner of the problem statement:
 > [`remaining-work.md`](./remaining-work.md) §4.2 / B3 / §7.3.
 
 > **What actually shipped vs. this proposal** (the design below is the reasoning; a
