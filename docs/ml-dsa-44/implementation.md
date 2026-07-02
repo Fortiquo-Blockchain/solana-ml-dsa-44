@@ -149,19 +149,27 @@ Ed25519.
   `replay_stage` asserts that), the address is funded, and **`tpu_enable_udp` is
   forced on** (the regular TPU only ingests UDP when enabled; default is
   QUIC-only, which silently drops the raw-UDP vote packets).
-- **⚠️ Caveats (Phase-2 PoC):** ML-DSA votes ride the **regular TPU over UDP**
-  and do **not** propagate via gossip CRDS — fine single-node; a multi-node
-  cluster would only observe them via block replay. Each vote pays a normal
-  ~5000-lamport fee (genesis funds the address with 1M SOL); stock votes are
-  feeless. Same Phase-1 CPU-sigverify caveat (GPU path drops `0x00`). One
+- **⚠️ Caveats (Phase-2 PoC) — SINGLE-NODE ONLY:** ML-DSA votes ride the
+  **regular TPU over UDP** and do **not** propagate via gossip CRDS. On a
+  multi-node cluster a peer that _replays_ a block containing a `0x00` vote
+  **fails signature verification and marks the slot dead**: banking records the
+  vote as a `VersionedTransaction` carrying only the 64-byte _synthetic_ Ed25519
+  id (`MlDsaTransaction::synthetic_signature`) — the 1312-B pubkey + 2420-B
+  ML-DSA signature are dropped once TPU sigverify passes — and replay
+  (`blockstore_processor` → `bank.verify_transaction(.., FullVerification)`)
+  Ed25519-verifies that id and fails, so the cluster cannot finalize on PQ votes.
+  Fix path (block must carry the ML-DSA proof + replay must ML-DSA-verify it):
+  [`remaining-work.md`](./remaining-work.md) §4.2 / B3 / §7.3. Each vote pays a
+  normal ~5000-lamport fee (genesis funds the address with 1M SOL); stock votes
+  are feeless. Same Phase-1 CPU-sigverify caveat (GPU path drops `0x00`). One
   `authorized_voter` per epoch ⇒ no live Ed25519↔ML-DSA hot-swap; switching is a
   flag-gated restart.
 
-Verified live: with `--ml-dsa-vote`, the vote account's authorized voter is the
-post-quantum address and processed/confirmed/finalized slots + the vote
-account's `lastVote`/root all advance (the chain roots on ML-DSA votes); without
-the flag, Ed25519 voting is unchanged. Commands: [`runbook.md`](./runbook.md)
-Phase 2.
+Verified live (single node): with `--ml-dsa-vote`, the vote account's authorized
+voter is the post-quantum address and processed/confirmed/finalized slots + the
+vote account's `lastVote`/root all advance (the chain roots on ML-DSA votes);
+without the flag, Ed25519 voting is unchanged. Commands:
+[`runbook.md`](./runbook.md) Phase 2.
 
 ---
 

@@ -52,9 +52,9 @@ about **hardening, multi-node, and the one surface that is only partially done
 | -----: | ----------------------------------- | -------------------------------------------- | ---------------------------- | ----------------------------------------------- |
 |  **0** | App-level verify (precompile)       | program id `6Cjqvizo…VbNSs`, `feature: None` | ✅ Done                      | unit + integration + FIPS-204 KAT + live RPC    |
 |  **1** | User payments                       | `0x00` tx marker (`ML_DSA_TX_MARKER`)        | ✅ Done                      | unit + bank-exec + live RPC                     |
-| **2a** | Validator votes                     | `--ml-dsa-vote <KEYFILE>`                    | ✅ Done                      | unit + **single-node** live (finalizes)         |
+| **2a** | Validator votes                     | `--ml-dsa-vote <KEYFILE>`                    | ⚠️ Single-node only          | unit + single-node finalizes; **multi-node BLOCKED at replay** (B3/§4.2) |
 | **2b** | Node-to-node gossip (CRDS)          | `CrdsSignature` enum                         | ✅ **Core** done             | unit + **2-node** live wire                     |
-|  **3** | Block broadcasting (shreds/turbine) | `--ml-dsa-shred[-strict]`                    | ✅ Done (additive)           | unit + **single-node** produce + offline verify |
+|  **3** | Block broadcasting (shreds/turbine) | `--ml-dsa-shred[-strict]`                    | ✅ Done (additive)           | unit + **N=2 strict turbine** peer-verify + offline verify |
 |  **4** | **Node identity → ML-DSA**          | —                                            | ❌ **Not started** (blocked) | —                                               |
 
 **One-line takeaway:** every signing surface has been implemented and
@@ -91,7 +91,7 @@ should not be fixed on this fork).
 | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | B1  | **Node identity is still Ed25519** (QUIC/TLS X.509 cert is Ed25519-keyed). Can't flip `id()` to the ML-DSA address without partitioning from turbine/repair/TPU. | The node authenticates itself to peers with Ed25519. The "PQ validator" is PQ in its _payloads_, not its _identity_. | **Fixable → §7.1** (large: TLS + ping/pong/prune)          |
 | B2  | **No GPU/CUDA path for ML-DSA.** Any batch containing a `0x00`/ml_dsa packet falls back to CPU sigverify.                                                        | Throughput of PQ traffic is CPU-bound. Fine for a demo; a bottleneck at load.                                        | **Fixable → §7.2** (new CUDA kernel; not on critical path) |
-| B3  | **Multi-node propagation is unproven.** PQ votes ride the regular TPU over **UDP**, not gossip CRDS; the 2b gossip path is verified only at N=2.                 | A real cluster's behavior (vote propagation, CRDS packing, repair) has never been observed.                          | **Fixable → §7.3**                                         |
+| B3  | **Multi-node PQ voting is broken at block replay** (now tested at N=2). A peer marks every slot carrying a `0x00` PQ vote **dead** (`SignatureFailure`): the recorded vote tx keeps only a 64-byte _synthetic_ Ed25519 id and carries no ML-DSA proof to re-verify. Ed25519 consensus and multi-node PQ **shreds** (strict turbine) are proven working at N=2. | A multi-node cluster cannot finalize on ML-DSA votes; the vote surface is effectively single-node. | **Fixable → §7.3** (needs a block-format / replay-verify change) |
 | B4  | **Shred verify is advisory by default.** ML-DSA shred failures emit metrics but don't drop packets unless `--ml-dsa-shred-strict`.                               | Out of the box, a forged ML-DSA trailer is logged, not rejected.                                                     | **Fixable → §7.5** (flip default once multi-node-proven)   |
 | B5  | **frozen-abi digests changed** (`CrdsValue`, `Protocol`) and are only regenerable under a nightly/specialization build.                                          | Inert on our pinned stable 1.76 — but blocks any move to nightly ABI-checked CI.                                     | **Fixable → §7.4**                                         |
 | B6  | **Phase-1 scope is single-signer, legacy `Message` only.** Multi-sig / v0 / address-lookup-table txs are rejected at decode.                                     | No PQ multi-sig, no versioned transactions.                                                                          | **Fixable → §7.5**                                         |
@@ -114,33 +114,37 @@ proven."
    `ContactInfo`, `Ping`, `Pong`, `PruneData` with Ed25519. This is entangled
    with B1 (identity) — see §7.1.
 
-2. **Multi-node consensus finalizing on PQ votes — single-node only.**
-   `demo-vote.sh` proves _one_ validator roots on its own ML-DSA votes. A
-   cluster where several validators vote post-quantum and must observe each
-   other's votes has never run. Votes propagate over UDP TPU, **not** gossip, so
-   a second node only learns of them via block replay
-   (`core/src/voting_service.rs` `VoteOp::*MlDsaVote`).
+2. **Multi-node consensus finalizing on PQ votes — TESTED and BLOCKED.** A
+   2-node cluster where every validator votes ML-DSA (both vote accounts
+   repointed to the ML-DSA address; both nodes _do_ sign PQ votes) does **not**
+   finalize: a peer marks every slot carrying a PQ vote **dead** with
+   `InvalidTransaction(SignatureFailure)`. A `0x00` vote is bridged in banking to
+   a `VersionedTransaction` whose only signature is the 64-byte _synthetic_ id
+   (`MlDsaTransaction::synthetic_signature`); the 1312-byte pubkey + 2420-byte
+   ML-DSA signature are dropped once TPU sigverify passes
+   (`core/src/banking_stage/immutable_deserialized_packet.rs::new_ml_dsa`). On
+   replay, `blockstore_processor` →
+   `bank.verify_transaction(.., FullVerification)` →
+   `VersionedTransaction::verify_and_hash_message` Ed25519-verifies that synthetic
+   id against the message and fails. The recorded block carries **no** ML-DSA
+   proof, so a peer cannot re-verify even in principle — and this is _independent_
+   of gossip propagation, since the vote tx must execute in a replayed block to
+   affect consensus. Reproduce: `cargo test -p solana-local-cluster --test
+   ml_dsa_cluster test_mldsa_votes_finalize_cluster -- --ignored`. Fix path: §7.3.
 
-3. **Strict shred enforcement across real turbine fan-out — unit-tested only.**
-   `enforce_ml_dsa_shreds` (`ledger/src/sigverify_shreds.rs:153`) is covered by
-   unit tests, but a **node's own** shreds bypass turbine sigverify (that path
-   verifies _peer_ shreds), so on one node the counters never climb. Behavior
-   when a real peer sends a real ML-DSA shred under `--ml-dsa-shred-strict` is
-   unobserved.
-
-4. **ML-DSA CRDS propagation at N > 2 — untested and known-finicky.** Even at
+3. **ML-DSA CRDS propagation at N > 2 — untested and known-finicky.** Even at
    N=2, general CRDS propagation is delicate: `ContactInfo` propagates, but
    stake-weighted votes don't, so the 2b demo uses a `ContactInfo` value +
    bidirectional `insert_info`. Larger fan-out, packing (~3 PQ values per
    packet), and pull/push dynamics are unexplored.
 
-5. **The GPU fallback path — never exercised.** `batches_contain_ml_dsa` +
+4. **The GPU fallback path — never exercised.** `batches_contain_ml_dsa` +
    `warn_ml_dsa_gpu_fallback_once` (`perf/src/sigverify.rs:632`, `:643`) route
    PQ batches to CPU when perf-libs is loaded. `solana-test-validator` runs with
    GPU sigverify **off**, so this branch has never actually run against a real
    CUDA build. If you enable perf-libs, verify the fallback trips.
 
-6. **Multi-signer / v0 / address-lookup-table transactions — rejected at
+5. **Multi-signer / v0 / address-lookup-table transactions — rejected at
    decode.** Phase 1 (`sdk/src/ml_dsa_transaction.rs`) accepts exactly one
    required signer and legacy `Message` only. Anything else errors out — there
    is no partial support to "test," just a hard boundary to extend.
@@ -287,42 +291,54 @@ Defer until PQ load actually matters.
 
 ### 7.3 True multi-node post-quantum propagation _(B3 · do this first)_
 
-This is the highest-leverage next step because it _unblocks the testing_ for
-everything else (§7.1, B4).
+**Status (2026-07):** a multi-node harness now exists —
+`local-cluster/src/local_cluster.rs` grows per-node ML-DSA config (genesis
+vote-account repoint to the ML-DSA authorized voter + UDP-TPU enable), and
+`local-cluster/tests/ml_dsa_cluster.rs` exercises N=2. What it found:
 
-- **Stand up a multi-node harness — get plain Ed25519 rooting _first_.**
-  `multinode-demo/*` boots an Ed25519 cluster; before adding any ML-DSA, confirm
-  an N≥2 cluster reliably produces roots with **proper genesis stakes** and
-  realistic vote pacing (~one vote/slot). Only then adapt it to pass
-  `--ml-dsa-vote` / `--ml-dsa-shred` and PQ vote authorities to each validator.
-  This is where §4.2/§4.3/§4.4 finally get observed.
-- **Make PQ votes gossip-observable.** Today they ride UDP TPU only
-  (`voting_service.rs` `VoteOp::PushMlDsaVote` → `send_transaction_raw`), so
-  peers see them only via block replay. Decide whether that's acceptable for a
-  cluster or whether votes should also propagate via a CRDS value (needs the 2b
-  path + likely §7.1 for a PQ-signed identity).
+- **Ed25519 baseline roots reliably at N=2** — both the canonical
+  (leader-in-genesis + dynamic join) and the all-in-genesis config. The
+  previously suspected "stall at root 1 / `InsertFailed`" **did not reproduce**
+  on a `tsc`-clocksource WSL (0 `InsertFailed` / `UnknownStakes` in healthy
+  runs); the wallclock-override (`crds.rs:194`) and empty-stakes push
+  (`crds.rs:645`, `push_active_set.rs:38`) paths stayed latent. Proper genesis
+  stakes + normal vote pacing were sufficient with **no code change** — the stall
+  was an environment/config artifact, never the `CrdsSignature` enum.
+- **Multi-node PQ shreds work under strict turbine.** With
+  `--ml-dsa-shred[-strict]` on every node, honest peer ML-DSA shreds verify
+  across real turbine and the cluster keeps rooting (0 dropped, 0 dead slots) —
+  the surface that was unit-tested only is now observed node-to-node.
+- **Multi-node PQ votes are BLOCKED at block replay (B3).** See §4.2: peers
+  Ed25519-verify the synthetic vote signature and mark the slot dead. **The real
+  fix is not gossip** — the vote tx must execute in a replayed block regardless,
+  so the recorded block must **carry the ML-DSA proof** and the replay/entry
+  verification path (`blockstore_processor` → `bank.verify_transaction`) must
+  **ML-DSA-verify** `0x00` txs instead of Ed25519. This is a consensus
+  block-format change (entry/blockstore serialization + PoH, replay sigverify,
+  and the banking record path) — scope it before starting.
+
+**Still open, secondary to the replay fix:**
+
+- **Make PQ votes gossip-observable** (`voting_service.rs` `VoteOp::PushMlDsaVote`
+  → `send_transaction_raw`). Useful for optimistic confirmation, but
+  necessary-but-insufficient: it does **not** remove the replay-verify
+  requirement above.
 - **Exercise CRDS at N>2.** Confirm PQ `CrdsValue`s propagate under real
   pull/push, measure packing (~3 PQ values/packet).
 
-**⚠️ The N=2 `LocalCluster` stall is NOT the ML-DSA work** (investigated
-2026-07, two independent code passes). A 2-node cluster stalls at root 1 with
-`push_vote failed: InsertFailed`; the cause is inherent Solana gossip at small
-N, **not** the `CrdsSignature` enum (verified: `signable_data = serialize(&data)`
-is unchanged and `par_verify` at `cluster_info.rs:312`/`:326` accepts Ed25519
-votes in an all-fork cluster). Two mechanisms: **(a)** Vote CRDS override is
-purely wallclock-based (`crds.rs:194`); a fresh vote stamped `now = timestamp()`
-(ms; `push_vote_at_index` `:1076`) fails to override the prior vote at a recycled
-index when the clock has not advanced — upstream's own test sleeps 1 ms to dodge
-this (`cluster_info.rs:3810`), and WSL's non-monotonic clock makes it bite.
-**(b)** At genesis/root-1 the root-bank stakes are empty/zero, so `crds.trim`
-returns `UnknownStakes` (`crds.rs:645`; TODO at `cluster_info.rs:1813`) and the
-stake-weighted push active set degenerates (`push_active_set.rs:38`). So the fix
-lives in **genesis stakes + vote pacing + a monotonic clock (not WSL)**, or a
-code change (wallclock jitter) — never the enum. Which mechanism dominates live,
-and when stakes populate, need a build/run to pin down.
+**⚠️ The N=2 stall worry is resolved — it did not reproduce.** The prior concern
+(a 2-node cluster stalling at root 1 with `push_vote failed: InsertFailed`, from
+the wallclock vote-override `crds.rs:194` and empty-stakes push `crds.rs:645` /
+`push_active_set.rs:38`) never materialized on a `tsc`-clocksource WSL: both the
+canonical and all-in-genesis Ed25519 configs root with 0 `InsertFailed` /
+`UnknownStakes`, and it was never the `CrdsSignature` enum. Those paths stay
+latent, so no gossip/clock code change is needed here. Caveat: the WSL clock is
+only _monotonic enough_ on `tsc`; on a coarse/non-monotonic clock the latent
+wallclock-override could still bite, so prefer real hardware/VMs for scale runs.
 
-**Effort:** medium — mostly harness + observation, minimal new crypto. Highest
-priority.
+**Effort:** the block-format / replay-verify change for votes is the large piece
+(comparable to a new phase — it touches consensus-critical serialization); the
+multi-node harness and the shred-verify surface are done.
 
 ### 7.4 frozen-abi digest regeneration _(B5 · inert today)_
 
@@ -401,9 +417,15 @@ work are cited inline in §3/§4/§7.)
 - **Examples:**
   `programs/ml-dsa-tests/examples/{submit_live,ml_dsa_transfer,bench_verify,verify_ml_dsa_shreds}.rs`,
   `perf/examples/sigverify_ml_dsa.rs`.
+- **Multi-node harness:** `local-cluster/tests/ml_dsa_cluster.rs` (N=2 Ed25519
+  baseline, PQ shred-strict turbine, PQ votes repro) + the ML-DSA config in
+  `local-cluster/src/local_cluster.rs`. Run: `cargo test -p solana-local-cluster
+  --test ml_dsa_cluster --release` (add `-- --ignored` for the blocked vote test).
 
 ---
 
-_Last updated for `feat/ml-dsa-44` at commit `5340dd5c8`. Phases 0–3 (+ 2b core)
-delivered and single-node verified; Phase 4 (node identity) not started. "Live"
-throughout means a self-hosted post-quantum network, never live public Solana._
+_Last updated for `feat/ml-dsa-44`. Phases 0–3 (+ 2b core) delivered. Multi-node
+(N=2, `LocalCluster`) now exercised: Ed25519 consensus and PQ **shreds** (strict
+turbine peer-verify) work; PQ **votes** are blocked at block replay (B3/§4.2).
+Phase 4 (node identity) not started. "Live" throughout means a self-hosted
+post-quantum network, never live public Solana._
