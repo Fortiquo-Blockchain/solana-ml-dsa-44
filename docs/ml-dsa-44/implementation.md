@@ -149,27 +149,30 @@ Ed25519.
   `replay_stage` asserts that), the address is funded, and **`tpu_enable_udp` is
   forced on** (the regular TPU only ingests UDP when enabled; default is
   QUIC-only, which silently drops the raw-UDP vote packets).
-- **⚠️ Caveats (Phase-2 PoC) — SINGLE-NODE ONLY:** ML-DSA votes ride the
-  **regular TPU over UDP** and do **not** propagate via gossip CRDS. On a
-  multi-node cluster a peer that _replays_ a block containing a `0x00` vote
-  **fails signature verification and marks the slot dead**: banking records the
-  vote as a `VersionedTransaction` carrying only the 64-byte _synthetic_ Ed25519
-  id (`MlDsaTransaction::synthetic_signature`) — the 1312-B pubkey + 2420-B
-  ML-DSA signature are dropped once TPU sigverify passes — and replay
-  (`blockstore_processor` → `bank.verify_transaction(.., FullVerification)`)
-  Ed25519-verifies that id and fails, so the cluster cannot finalize on PQ votes.
-  Fix path (block must carry the ML-DSA proof + replay must ML-DSA-verify it):
-  [`remaining-work.md`](./remaining-work.md) §4.2 / B3 / §7.3. Each vote pays a
-  normal ~5000-lamport fee (genesis funds the address with 1M SOL); stock votes
-  are feeless. Same Phase-1 CPU-sigverify caveat (GPU path drops `0x00`). One
+- **Wire format — replay-safe envelope carrier (multi-node finalizes):** a PQ
+  vote is a standard `VersionedTransaction` whose sole signer (the ML-DSA address)
+  is authorized by an appended ML-DSA **carrier** precompile instruction rather
+  than by an Ed25519 envelope signature (`generate_vote_tx` →
+  `solana_sdk::ml_dsa_envelope::sign_ml_dsa_transaction`). Because the ML-DSA proof
+  rides _inside_ the transaction, it is recorded in the block and re-verified
+  identically on every node — at TPU ingress (`perf` sigverify) and on replay
+  (`bank.verify_transaction` → `verify_and_hash_message`), so peers finalize the
+  block (`test_mldsa_votes_finalize_cluster`, N=2, 0 dead slots). This replaced the
+  earlier `0x00`/synthetic-signature vote, whose proof was dropped after TPU
+  sigverify and thus failed peer replay. Design + constraints (no feature gate ⇒
+  all nodes must be upgraded together; run with GPU sigverify off):
+  [`pq-tx-replay-fix-plan.md`](./pq-tx-replay-fix-plan.md).
+- **⚠️ Other caveats:** votes still ride the **regular TPU over UDP** (not gossip
+  CRDS) — fine for finalization since the carrier tx replays like any tx. Each vote
+  pays a normal ~5000-lamport fee (genesis funds the address with 1M SOL); stock
+  votes are feeless. CPU-sigverify only (see the GPU caveat in the plan doc). One
   `authorized_voter` per epoch ⇒ no live Ed25519↔ML-DSA hot-swap; switching is a
   flag-gated restart.
 
-Verified live (single node): with `--ml-dsa-vote`, the vote account's authorized
-voter is the post-quantum address and processed/confirmed/finalized slots + the
-vote account's `lastVote`/root all advance (the chain roots on ML-DSA votes);
-without the flag, Ed25519 voting is unchanged. Commands:
-[`runbook.md`](./runbook.md) Phase 2.
+Verified live: single-node with `--ml-dsa-vote` roots on ML-DSA votes (authorized
+voter = the post-quantum address); and an N=2 `LocalCluster` **finalizes** on
+ML-DSA votes with peers replay-verifying the proof. Without the flag, Ed25519
+voting is unchanged. Commands: [`runbook.md`](./runbook.md) Phase 2.
 
 ---
 
