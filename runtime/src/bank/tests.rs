@@ -340,7 +340,7 @@ fn test_bank_block_height() {
 // happens in sigverify), so the Ed25519 runtime path is untouched.
 #[test]
 fn test_ml_dsa_transfer_executes() {
-    use solana_sdk::{ml_dsa_keypair::MlDsaKeypair, ml_dsa_transaction::MlDsaTransaction};
+    use solana_sdk::{ml_dsa_envelope::sign_ml_dsa_transaction, ml_dsa_keypair::MlDsaKeypair};
 
     // Wrapped in bank-forks so the program cache's fork graph is initialized.
     let bank = create_simple_test_arc_bank(0).0;
@@ -355,30 +355,32 @@ fn test_ml_dsa_transfer_executes() {
 
     let recipient = solana_sdk::pubkey::Pubkey::new_unique();
     let amount = solana_sdk::native_token::LAMPORTS_PER_SOL;
-    let mut message = solana_sdk::message::Message::new(
+
+    // Replay-safe post-quantum payment: a standard transaction whose sole signer (the
+    // ML-DSA address) is authorized by an appended ML-DSA carrier precompile.
+    let tx = sign_ml_dsa_transaction(
         &[solana_sdk::system_instruction::transfer(
             &payer.address(),
             &recipient,
             amount,
         )],
-        Some(&payer.address()),
+        &payer,
+        bank.last_blockhash(),
+    )
+    .unwrap();
+    let versioned = solana_sdk::transaction::VersionedTransaction::from(tx);
+
+    // The carrier authorizes the ML-DSA signer through the same verification a peer
+    // runs on replay.
+    assert!(
+        versioned.verify_and_hash_message().is_ok(),
+        "envelope ML-DSA payment must verify"
     );
-    message.recent_blockhash = bank.last_blockhash();
-
-    // Sign with ML-DSA-44 and verify off-chain (signature + address binding).
-    let mltx = MlDsaTransaction::sign(message, &[&payer]).unwrap();
-    assert!(mltx.verify_offchain());
-    let synthetic = mltx.synthetic_signature();
-
-    // Bridge to the runtime transaction type using the synthetic id and execute.
-    let versioned = solana_sdk::transaction::VersionedTransaction {
-        signatures: vec![synthetic],
-        message: solana_sdk::message::VersionedMessage::Legacy(mltx.message.clone()),
-    };
+    let signature = versioned.signatures[0];
     let _ = bank.process_transaction_with_metadata(versioned);
 
     assert_eq!(
-        bank.get_signature_status(&synthetic),
+        bank.get_signature_status(&signature),
         Some(Ok(())),
         "ML-DSA transfer should execute successfully"
     );
