@@ -44,7 +44,7 @@ use {
 // typed `Transaction`); converting it with no cluster to validate against would
 // ship unverified harness code. The ML-DSA cost that bounds its TPS is the
 // per-packet VERIFY cost, now measured for real through the actual CPU verify
-// pipeline (`sigverify::ed25519_verify` -> `verify_ml_dsa_packet`): ~2.4x ed25519
+// pipeline (`sigverify::ed25519_verify` -> `verify_ml_dsa_envelope_packet`): ~2.4x ed25519
 // at ~3.9 KB/packet (21x larger). Reproduce on the pinned 1.76 toolchain:
 //   cargo run --release -p solana-perf --example sigverify_ml_dsa
 //   (nightly bench: perf/benches/sigverify.rs::bench_sigverify_ml_dsa)

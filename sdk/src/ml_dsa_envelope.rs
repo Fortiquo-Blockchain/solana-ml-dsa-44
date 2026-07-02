@@ -1,7 +1,7 @@
 //! Replay-safe post-quantum (ML-DSA-44) transaction signatures.
 //!
-//! The Phase-1 `0x00` [`crate::ml_dsa_transaction::MlDsaTransaction`] verifies its
-//! ML-DSA signature only at TPU ingress and then records a transaction whose only
+//! The earlier Phase-1 `0x00` ML-DSA transaction format verified its
+//! ML-DSA signature only at TPU ingress and then recorded a transaction whose only
 //! signature is a non-verifiable synthetic id — so a *peer* that replays the block
 //! cannot re-verify it and marks the slot dead. This module fixes that by keeping
 //! the transaction a **standard** [`Transaction`] and carrying the ML-DSA proof

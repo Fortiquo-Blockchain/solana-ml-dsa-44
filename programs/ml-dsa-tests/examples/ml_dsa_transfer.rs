@@ -17,9 +17,10 @@ use {
     solana_rpc_client::rpc_client::RpcClient,
     solana_rpc_client_api::request::RpcRequest,
     solana_sdk::{
-        commitment_config::CommitmentConfig, hash::Hash, message::Message,
-        ml_dsa_keypair::MlDsaKeypair, ml_dsa_transaction::MlDsaTransaction,
+        commitment_config::CommitmentConfig, hash::Hash,
+        ml_dsa_envelope::sign_ml_dsa_transaction, ml_dsa_keypair::MlDsaKeypair,
         native_token::LAMPORTS_PER_SOL, system_instruction,
+        transaction::VersionedTransaction,
     },
     std::{str::FromStr, time::Duration},
 };
@@ -166,25 +167,25 @@ fn main() {
     );
     let blockhash = Hash::from_str(bh["value"]["blockhash"].as_str().expect("blockhash"))
         .expect("parse blockhash");
-    let mut message = Message::new(
+    // Replay-safe post-quantum payment: a standard transaction whose sole signer
+    // (Alice's ML-DSA address) is authorized by an appended ML-DSA carrier
+    // precompile instruction, so every node re-verifies the proof (including on
+    // block replay). See `solana_sdk::ml_dsa_envelope`.
+    let tx = sign_ml_dsa_transaction(
         &[system_instruction::transfer(
             &alice.address(),
             &bob.address(),
             amount,
         )],
-        Some(&alice.address()),
-    );
-    message.recent_blockhash = blockhash;
-    let mltx = MlDsaTransaction::sign(message, &[&alice]).expect("ml-dsa sign");
-    let wire = mltx.serialize();
-    let sig_preview = if wire.len() >= 2 + 16 {
-        hex_preview(&wire[2..2 + 16], 16)
-    } else {
-        "..".to_string()
-    };
+        &alice,
+        blockhash,
+    )
+    .expect("ml-dsa sign");
+    let wire = bincode::serialize(&VersionedTransaction::from(tx.clone())).expect("serialize");
+    let sig_preview = hex_preview(&tx.signatures[0].as_ref()[..16], 16);
     println!("\n  Signing the payment with ML-DSA-44 (post-quantum):");
-    println!("    signature size:        {SIG_LEN} bytes");
-    println!("    signature (first 16 B): {sig_preview}…");
+    println!("    ML-DSA signature size: {SIG_LEN} bytes (carried inside the transaction)");
+    println!("    tx id (first 16 B):    {sig_preview}…");
     println!("    whole signed payment:  {} bytes  (an Ed25519 one is ~250)", wire.len());
     println!("  Submitting to the validator (sendTransaction):");
     let send = rpc(

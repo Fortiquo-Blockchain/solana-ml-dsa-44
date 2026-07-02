@@ -5,15 +5,14 @@ use {
         clock::Slot,
         hash::Hash,
         instruction::CompiledInstruction,
-        message::Message,
+        ml_dsa_envelope::sign_ml_dsa_transaction,
         ml_dsa_keypair::MlDsaKeypair,
-        ml_dsa_transaction::MlDsaTransaction,
         pubkey::Pubkey,
         signature::{Keypair, Signer},
         stake,
         system_instruction::{self, SystemInstruction},
         system_program, system_transaction,
-        transaction::Transaction,
+        transaction::{Transaction, VersionedTransaction},
     },
     solana_vote_program::vote_transaction,
 };
@@ -57,30 +56,30 @@ pub fn test_multisig_tx() -> Transaction {
     )
 }
 
-/// Raw wire bytes of a post-quantum ML-DSA-44 (Phase 1, `0x00`-marked) transfer
-/// transaction — the workload the CPU verify pipeline runs through
-/// `sigverify::verify_ml_dsa_packet` (deserialize, `sha256(pubkey)==account_key`
-/// address binding, then ML-DSA-44 verify). Each call mints a fresh keypair and
-/// signs, so it is comparatively slow (ML-DSA keygen + sign); build one wire and
-/// reuse it across packets when benchmarking *verify* throughput.
+/// Raw wire bytes of a replay-safe post-quantum ML-DSA-44 transfer — a standard
+/// `VersionedTransaction` carrying the ML-DSA proof as a carrier precompile
+/// instruction (see `solana_sdk::ml_dsa_envelope`). This is the workload the CPU
+/// verify pipeline runs through the envelope fallback in `sigverify::verify_packet`.
+/// Each call mints a fresh keypair and signs, so it is comparatively slow (ML-DSA
+/// keygen + sign); build one wire and reuse it across packets when benchmarking
+/// *verify* throughput.
 pub fn test_ml_dsa_tx_wire() -> Vec<u8> {
     let payer = MlDsaKeypair::new().expect("ml-dsa keygen");
-    let message = Message::new(
+    let tx = sign_ml_dsa_transaction(
         &[system_instruction::transfer(
             &payer.address(),
             &Pubkey::new_unique(),
             42,
         )],
-        Some(&payer.address()),
-    );
-    MlDsaTransaction::sign(message, &[&payer])
-        .expect("ml-dsa sign")
-        .serialize()
+        &payer,
+        Hash::default(),
+    )
+    .expect("ml-dsa sign");
+    bincode::serialize(&VersionedTransaction::from(tx)).expect("serialize ml-dsa tx")
 }
 
-/// Pack raw ML-DSA `0x00` wire bytes into a [`Packet`] verbatim — the wire IS the
-/// payload (it is NOT bincode-framed like an Ed25519 [`Transaction`]), matching
-/// how the validator ingests post-quantum packets.
+/// Pack ML-DSA envelope wire bytes into a [`Packet`] verbatim (the wire is the
+/// bincoded `VersionedTransaction`), matching how the validator ingests packets.
 pub fn ml_dsa_packet(wire: &[u8]) -> Packet {
     let mut packet = Packet::from_data(None, 0u8).expect("packet header");
     packet.buffer_mut()[..wire.len()].copy_from_slice(wire);

@@ -16,10 +16,11 @@ use {
 
 // --- ML-DSA-44 vs ed25519 sigverify pipeline baseline (EPIC 4-2) ---
 // `bench_sigverify_simple` is the ed25519 baseline; `bench_sigverify_ml_dsa`
-// (below) drives post-quantum ML-DSA-44 `0x00` packets through the SAME CPU
-// verify pipeline (`sigverify::ed25519_verify` -> `verify_ml_dsa_packet`:
-// deserialize + `sha256(pubkey)==account_key` binding + ML-DSA-44 verify), so it
-// measures the real Phase-1 verify path, not the raw crypto primitive.
+// (below) drives replay-safe post-quantum ML-DSA-44 envelope packets through the
+// SAME CPU verify pipeline (`sigverify::ed25519_verify` ->
+// `verify_ml_dsa_envelope_packet`: deserialize + carrier-precompile ML-DSA verify
+// + address binding + anti-lift), so it measures the real verify path, not the
+// raw crypto primitive.
 //
 // These `#[bench]`es are nightly-only (`#![feature(test)]`) and the available
 // nightly cannot build the 2.0-era dep tree (pre-existing: ahash 0.7.6 uses the
@@ -58,8 +59,8 @@ fn bench_sigverify_simple(bencher: &mut Bencher) {
 
 #[bench]
 fn bench_sigverify_ml_dsa(bencher: &mut Bencher) {
-    // Post-quantum ML-DSA-44 (`0x00`) packets through the SAME CPU verify pipeline
-    // as `bench_sigverify_simple` (`ed25519_verify` -> `verify_ml_dsa_packet`).
+    // Post-quantum ML-DSA-44 envelope packets through the SAME CPU verify pipeline
+    // as `bench_sigverify_simple` (`ed25519_verify` -> `verify_ml_dsa_envelope_packet`).
     // One signed wire is reused across all packets (verify cost is per-packet and
     // independent of payload identity); see the module header for recorded numbers
     // and the stable runnable example.

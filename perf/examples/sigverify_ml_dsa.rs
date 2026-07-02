@@ -5,20 +5,21 @@
 //! feature — so this example measures the SAME signal on the pinned 1.76 stable
 //! toolchain. It drives the real CPU verify pipeline
 //! `solana_perf::sigverify::ed25519_verify` over a batch of ed25519 packets and
-//! over a batch of post-quantum ML-DSA-44 `0x00` packets, and reports the
-//! per-packet verify latency and the ML-DSA / ed25519 ratio.
+//! over a batch of replay-safe post-quantum ML-DSA-44 envelope packets, and
+//! reports the per-packet verify latency and the ML-DSA / ed25519 ratio.
 //!
 //! Unlike `programs/ml-dsa-tests/examples/bench_verify.rs` (which times the raw
-//! `fips204` primitives), this exercises the actual Phase-1 packet path:
-//! `verify_packet` -> `verify_ml_dsa_packet` (deserialize, `sha256(pubkey) ==
-//! account_key` address binding, then ML-DSA-44 verify) inside the batched
-//! pipeline — the same code a validator runs at TPU ingress.
+//! `fips204` primitives), this exercises the actual packet path:
+//! `verify_packet` -> `verify_ml_dsa_envelope_packet` (deserialize, carrier
+//! precompile ML-DSA-44 verify + `sha256(pubkey) == signer` binding + anti-lift)
+//! inside the batched pipeline — the same code a validator runs at TPU ingress.
 //!
 //! The ratio is apples-to-apples only on a host WITHOUT perf-libs/CUDA loaded
 //! (the default for `cargo run` and `solana-test-validator`): then both schemes
 //! use the CPU verify path. With perf-libs loaded, ed25519 would use the GPU
-//! kernel while ML-DSA stays on CPU (`batches_contain_ml_dsa` forces the
-//! fallback), so the two would not be directly comparable.
+//! kernel while ML-DSA envelope packets have no cheap GPU-diversion marker and are
+//! only verified when the batch falls to the CPU (see remaining-work B2), so the
+//! two would not be directly comparable.
 //!
 //! Run (WSL, pinned 1.76):
 //!     cargo run --release -p solana-perf --example sigverify_ml_dsa
