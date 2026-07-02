@@ -53,19 +53,29 @@ pub fn new_ml_dsa_instruction(
     public_key: PublicKey,
     message: &[u8],
 ) -> Instruction {
+    let signature: [u8; SIG_LEN] = private_key
+        .try_sign(message, ML_DSA_CONTEXT)
+        .expect("ML-DSA-44 signing should not fail");
+    let pubkey: [u8; PK_LEN] = public_key.into_bytes();
+    ml_dsa_instruction_from_parts(&pubkey, &signature, message)
+}
+
+/// Build the ML-DSA-44 precompile instruction from an already-computed public key
+/// and signature (no signing). This is the single authoritative encoder for the
+/// `[num_sig][pad][offsets][pubkey][signature][message]` layout; both
+/// [`new_ml_dsa_instruction`] and the replay-safe envelope carrier
+/// (`crate::ml_dsa_envelope`) go through it so the wire layout can never drift.
+pub fn ml_dsa_instruction_from_parts(
+    pubkey: &[u8; PK_LEN],
+    signature: &[u8; SIG_LEN],
+    message: &[u8],
+) -> Instruction {
     // The offsets are u16, so the message must be addressable within that range.
     // (In practice PACKET_DATA_SIZE bounds it far tighter, but fail loudly here.)
     assert!(
         message.len() <= u16::MAX as usize,
         "ML-DSA precompile message too large to address with u16 offsets",
     );
-    let signature: [u8; SIG_LEN] = private_key
-        .try_sign(message, ML_DSA_CONTEXT)
-        .expect("ML-DSA-44 signing should not fail");
-    let pubkey: [u8; PK_LEN] = public_key.into_bytes();
-
-    assert_eq!(pubkey.len(), PUBKEY_SERIALIZED_SIZE);
-    assert_eq!(signature.len(), SIGNATURE_SERIALIZED_SIZE);
 
     let mut instruction_data = Vec::with_capacity(
         DATA_START
@@ -96,11 +106,11 @@ pub fn new_ml_dsa_instruction(
 
     debug_assert_eq!(instruction_data.len(), public_key_offset);
 
-    instruction_data.extend_from_slice(&pubkey);
+    instruction_data.extend_from_slice(pubkey);
 
     debug_assert_eq!(instruction_data.len(), signature_offset);
 
-    instruction_data.extend_from_slice(&signature);
+    instruction_data.extend_from_slice(signature);
 
     debug_assert_eq!(instruction_data.len(), message_data_offset);
 
@@ -112,6 +122,14 @@ pub fn new_ml_dsa_instruction(
         data: instruction_data,
     }
 }
+
+/// Byte offset, within an ML-DSA carrier instruction's data, of the embedded
+/// public key (`ml_dsa_instruction_from_parts` places it at [`DATA_START`]).
+pub const CARRIER_PUBKEY_OFFSET: usize = DATA_START;
+/// Byte offset of the embedded signature.
+pub const CARRIER_SIGNATURE_OFFSET: usize = CARRIER_PUBKEY_OFFSET + PUBKEY_SERIALIZED_SIZE;
+/// Byte offset of the embedded message (everything after the signature).
+pub const CARRIER_MESSAGE_OFFSET: usize = CARRIER_SIGNATURE_OFFSET + SIGNATURE_SERIALIZED_SIZE;
 
 pub fn verify(
     data: &[u8],

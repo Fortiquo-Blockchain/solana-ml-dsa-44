@@ -79,28 +79,15 @@ fn test_ed25519_all_genesis_roots() {
 /// its vote account's authorized voter is the ML-DSA address (repointed at genesis by
 /// `LocalCluster::new`). Ed25519 voting is therefore *impossible* — the Ed25519 vote keypair is
 /// no longer an authorized voter — so a cluster that still reaches supermajority confirmations
-/// would, by construction, be finalizing on ML-DSA votes.
+/// is, by construction, finalizing on ML-DSA votes.
 ///
-/// KNOWN BLOCKER (multi-node): both nodes DO sign ML-DSA votes and the leader includes them in
-/// blocks, but a *peer* cannot finalize. An ML-DSA (0x00) vote rides the regular TPU over UDP and
-/// is bridged in banking to a `VersionedTransaction` whose only signature is a 64-byte *synthetic*
-/// id (`MlDsaTransaction::synthetic_signature`); the real 1312-byte pubkey + 2420-byte ML-DSA
-/// signature are dropped once TPU sigverify passes. When a peer replays that block,
-/// `blockstore_processor` calls `bank.verify_transaction(.., FullVerification)` →
-/// `VersionedTransaction::verify_and_hash_message`, which Ed25519-verifies the synthetic id
-/// against the message and fails with `SignatureFailure`, marking the slot DEAD (replay emits a
-/// `replay-stage-mark_dead_slot` datapoint whose error is `InvalidTransaction(SignatureFailure)`).
-/// No slot carrying a PQ vote can be rooted by a peer, so `spend_and_verify` never confirms and
-/// this test hangs.
-///
-/// A secure fix requires the recorded block to carry the ML-DSA proof and the replay/entry
-/// verification path to ML-DSA-verify it (a consensus block-format change), which is out of scope
-/// here. Ignored until then; run explicitly with `--ignored` to reproduce the dead-slot blocker.
-/// See docs/ml-dsa-44/remaining-work.md.
+/// This exercises the replay-safe post-quantum vote path (`solana_sdk::ml_dsa_envelope`): each
+/// vote is a standard transaction carrying its ML-DSA proof as a carrier precompile instruction,
+/// so a *peer* re-verifies the proof on block replay instead of rejecting the synthetic signature.
+/// (Before that path existed, peers marked every PQ-vote slot dead with `SignatureFailure` and the
+/// cluster could not finalize.)
 #[test]
 #[serial]
-#[ignore = "multi-node PQ vote finalization blocked: peers fail replay sigverify of 0x00 vote txs \
-            (synthetic Ed25519 sig); needs a block-format/replay-verify change. See test doc."]
 fn test_mldsa_votes_finalize_cluster() {
     solana_logger::setup_with_default(RUST_LOG_FILTER);
     let mut config = all_genesis_config(|configs| {

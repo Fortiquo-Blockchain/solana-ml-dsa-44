@@ -983,15 +983,28 @@ impl Transaction {
     /// Returns [`TransactionError::SignatureFailure`] on error.
     pub fn verify_and_hash_message(&self) -> Result<Hash> {
         let message_bytes = self.message_data();
-        if !self
+        if self
             ._verify_with_results(&message_bytes)
             .iter()
             .all(|verify_result| *verify_result)
+            || self.verify_ml_dsa_envelope()
         {
-            Err(TransactionError::SignatureFailure)
-        } else {
             Ok(Message::hash_raw_message(&message_bytes))
+        } else {
+            Err(TransactionError::SignatureFailure)
         }
+    }
+
+    /// Fallback for a post-quantum ML-DSA-44 transaction authorized by a carrier
+    /// precompile instruction (see [`crate::ml_dsa_envelope`]); inert otherwise.
+    #[cfg(feature = "full")]
+    fn verify_ml_dsa_envelope(&self) -> bool {
+        crate::ml_dsa_envelope::verify_ml_dsa_envelope(&self.message, &self.signatures)
+    }
+
+    #[cfg(not(feature = "full"))]
+    fn verify_ml_dsa_envelope(&self) -> bool {
+        false
     }
 
     /// Verifies that all signers have signed the message.

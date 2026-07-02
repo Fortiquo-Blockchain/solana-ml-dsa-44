@@ -24,8 +24,13 @@ pub enum VoteOp {
         tx: Transaction,
         last_voted_slot: Slot,
     },
-    // Post-quantum ML-DSA-44 votes: raw 0x00 wire bytes, submitted to the node's own
-    // regular TPU (never the vote-only port or gossip CRDS, which are Ed25519-typed).
+    // Post-quantum ML-DSA-44 votes: a bincoded standard `VersionedTransaction`
+    // carrying the ML-DSA proof as a carrier precompile instruction (see
+    // `solana_sdk::ml_dsa_envelope`), submitted to the node's own regular TPU.
+    // It must NOT go to the vote-only port: there sigverify runs with
+    // `reject_non_vote=true`, which disables the envelope fallback in `verify_packet`
+    // (and the 2-instruction carrier tx is not a simple-vote anyway), so the vote
+    // would be dropped at ingress. Not gossip CRDS either (that is Ed25519-typed).
     PushMlDsaVote {
         wire: Vec<u8>,
         tower_slots: Vec<Slot>,
@@ -110,7 +115,8 @@ impl VotingService {
                 cluster_info.refresh_vote(tx, last_voted_slot);
             }
             // ML-DSA votes go to the node's OWN regular TPU (None target), never the
-            // vote-only port (Phase 1 sigverify rejects 0x00 there) nor gossip CRDS.
+            // vote-only port (its reject_non_vote sigverify disables the envelope
+            // fallback) nor gossip CRDS. See `VoteOp::PushMlDsaVote`.
             VoteOp::PushMlDsaVote { wire, .. } | VoteOp::RefreshMlDsaVote { wire, .. } => {
                 let _ = cluster_info.send_transaction_raw(&wire, None);
             }

@@ -81,6 +81,7 @@ pub mod hash;
 pub mod inflation;
 pub mod inner_instruction;
 pub mod log;
+pub mod ml_dsa_envelope;
 pub mod ml_dsa_instruction;
 pub mod ml_dsa_keypair;
 pub mod ml_dsa_public_key;

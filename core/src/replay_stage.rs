@@ -72,9 +72,7 @@ use {
         hash::Hash,
         pubkey::Pubkey,
         saturating_add_assign,
-        message::Message,
         ml_dsa_keypair::MlDsaKeypair,
-        ml_dsa_transaction::MlDsaTransaction,
         signature::{Keypair, Signature, Signer},
         timing::timestamp,
         transaction::Transaction,
@@ -143,7 +141,9 @@ enum GenerateVoteTxResult {
     // failed generation, eligible for refresh
     Failed,
     Tx(Transaction),
-    // Post-quantum ML-DSA-44 vote: serialized 0x00 wire bytes + recent blockhash.
+    // Post-quantum ML-DSA-44 vote: a bincoded standard `VersionedTransaction` (the
+    // replay-safe envelope carrier form, see `solana_sdk::ml_dsa_envelope`) + recent
+    // blockhash. Not the old `0x00` wire format.
     MlDsaTx(Vec<u8>, Hash),
 }
 
@@ -2510,12 +2510,25 @@ impl ReplayStage {
                 .to_vote_instruction(vote, vote_account_pubkey, &ml_dsa_voter.address())
                 .expect("Switch threshold failure should not lead to voting");
             let blockhash = bank.last_blockhash();
-            let mut message = Message::new(&[vote_ix], Some(&ml_dsa_voter.address()));
-            message.recent_blockhash = blockhash;
-            let mltx = match MlDsaTransaction::sign(message, &[ml_dsa_voter.as_ref()]) {
+            // Replay-safe post-quantum vote: a standard transaction whose sole signer
+            // (the ML-DSA address) is authorized by an appended ML-DSA carrier
+            // precompile instruction rather than an Ed25519 signature, so every peer
+            // re-verifies the post-quantum proof on block replay. See
+            // `solana_sdk::ml_dsa_envelope`.
+            let tx = match solana_sdk::ml_dsa_envelope::sign_ml_dsa_transaction(
+                &[vote_ix],
+                ml_dsa_voter.as_ref(),
+                blockhash,
+            ) {
                 Ok(tx) => tx,
                 Err(err) => {
-                    warn!("Failed to sign ML-DSA vote: {err}");
+                    // A persistent ML-DSA signing failure silently benches the node
+                    // from consensus, so make it loud and alertable (not a warn!).
+                    error!("Failed to sign ML-DSA-44 vote: {err}");
+                    datapoint_error!(
+                        "replay-ml_dsa_vote_sign_failed",
+                        ("error", err.to_string(), String)
+                    );
                     return GenerateVoteTxResult::Failed;
                 }
             };
@@ -2525,14 +2538,24 @@ impl ReplayStage {
                 ml_dsa_voter.address(),
             );
             if !has_new_vote_been_rooted {
-                vote_signatures.push(mltx.synthetic_signature());
+                vote_signatures.push(tx.signatures[0]);
                 if vote_signatures.len() > MAX_VOTE_SIGNATURES {
                     vote_signatures.remove(0);
                 }
             } else {
                 vote_signatures.clear();
             }
-            return GenerateVoteTxResult::MlDsaTx(mltx.serialize(), blockhash);
+            let wire =
+                match bincode::serialize(&solana_sdk::transaction::VersionedTransaction::from(tx)) {
+                    Ok(wire) => wire,
+                    Err(err) => {
+                        // Skipping one vote is strictly better than taking the node
+                        // down (mirrors the signing-failure arm above).
+                        error!("Failed to serialize ML-DSA-44 vote transaction: {err}");
+                        return GenerateVoteTxResult::Failed;
+                    }
+                };
+            return GenerateVoteTxResult::MlDsaTx(wire, blockhash);
         }
 
         let authorized_voter_keypair = match authorized_voter_keypairs

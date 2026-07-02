@@ -160,15 +160,35 @@ impl VersionedTransaction {
     /// Verify the transaction and hash its message
     pub fn verify_and_hash_message(&self) -> Result<Hash> {
         let message_bytes = self.message.serialize();
-        if !self
+        if self
             ._verify_with_results(&message_bytes)
             .iter()
             .all(|verify_result| *verify_result)
+            || self.verify_ml_dsa_envelope()
         {
-            Err(TransactionError::SignatureFailure)
-        } else {
             Ok(VersionedMessage::hash_raw_message(&message_bytes))
+        } else {
+            Err(TransactionError::SignatureFailure)
         }
+    }
+
+    /// Fallback verification for a post-quantum ML-DSA-44 transaction whose sole
+    /// signer is authorized by a carrier precompile instruction rather than an
+    /// Ed25519 envelope signature (see [`crate::ml_dsa_envelope`]). Inert for
+    /// ordinary transactions and for the non-`full` builds that lack fips204.
+    #[cfg(feature = "full")]
+    fn verify_ml_dsa_envelope(&self) -> bool {
+        match &self.message {
+            VersionedMessage::Legacy(message) => {
+                crate::ml_dsa_envelope::verify_ml_dsa_envelope(message, &self.signatures)
+            }
+            VersionedMessage::V0(_) => false,
+        }
+    }
+
+    #[cfg(not(feature = "full"))]
+    fn verify_ml_dsa_envelope(&self) -> bool {
+        false
     }
 
     /// Verify the transaction and return a list of verification results
