@@ -7,7 +7,7 @@
 //! 64), so it cannot BE the universal `Signature`, which is the fixed 64-byte
 //! value the runtime, gossip, shreds, and RPC use as a transaction id. The raw
 //! 2420-byte signatures still travel inside the transaction body as
-//! `[u8; SIG_LEN]` (see [`crate::ml_dsa_transaction`]); this newtype is the
+//! `[u8; SIG_LEN]` (see [`crate::ml_dsa_envelope`]); this newtype is the
 //! typed, base58-displayable, serde-serializable wrapper around one of them.
 
 #![cfg(feature = "full")]

@@ -6,7 +6,7 @@
 //! sign votes, gossip, and shreds). An ML-DSA-44 public key is 1312 bytes, so it
 //! cannot be a 32-byte account address; instead the address is the SHA-256 hash of
 //! the public key, and the full key travels inside the transaction (see
-//! [`crate::ml_dsa_transaction`]).
+//! [`crate::ml_dsa_envelope`]).
 
 #![cfg(feature = "full")]
 

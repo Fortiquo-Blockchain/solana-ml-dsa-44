@@ -8,7 +8,7 @@
 //! for accounts-db, PDAs, and base58 display. Instead the address is the
 //! SHA-256 hash of the public key (see [`crate::ml_dsa_keypair::ml_dsa_address`]),
 //! and the full key travels inside the transaction body (see
-//! [`crate::ml_dsa_transaction`]). This newtype is the typed, base58-displayable,
+//! [`crate::ml_dsa_envelope`]). This newtype is the typed, base58-displayable,
 //! serde-serializable wrapper pairing a 1312-byte key with that derivation.
 
 #![cfg(feature = "full")]

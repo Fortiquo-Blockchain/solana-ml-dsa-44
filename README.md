@@ -66,7 +66,7 @@ repair) is still Ed25519; flipping it is Phase 4.
 | Phase  | Surface                     | "Done" means                                                                                                                           | Key flag / artifact                                                      |
 | ------ | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | **0**  | App-level precompile        | ML-DSA verify instruction; valid passes, tampered rejected; live ~3.9 KB tx confirms                                                   | program id `6Cjqvizo…VbNSs`, `feature: None`                             |
-| **1**  | User payments               | A fee payer signs a SOL transfer with ML-DSA (`address = sha256(pubkey)`); validator verifies, executes, confirms; forged one rejected | `0x00` lead-byte tx format, CPU sigverify                                |
+| **1**  | User payments               | A fee payer signs a SOL transfer with ML-DSA (`address = sha256(pubkey)`); validator verifies, executes, confirms; forged one rejected | ML-DSA envelope carrier precompile, CPU sigverify                        |
 | **2a** | Validator votes             | The validator's own consensus votes are ML-DSA-signed; chain confirms + **finalizes** on them                                          | `--ml-dsa-vote <KEYFILE>`                                                |
 | **2b** | Node chatter (gossip)       | CRDS values carry an ML-DSA signature + `sha256(pubkey)==identity` binding; propagates + verifies across two live nodes                | `CrdsSignature` enum                                                     |
 | **3**  | Block broadcasting (shreds) | Each FEC-set Merkle root is _also_ ML-DSA-signed; advisory verify at turbine ingress (opt-in gating)                                   | `--ml-dsa-shred <KEYFILE>` · `--ml-dsa-shred-strict`                     |
@@ -204,7 +204,7 @@ solana slot --commitment finalized
 > **Tip:** any local path works for `--ledger`. **On WSL specifically**, keep ledgers on
 > ext4 (`~/...`), not `/mnt/d` (slow drvfs I/O). The Phase-1 CPU-sigverify caveat applies
 > on every host: run with GPU sigverify disabled (the default for `solana-test-validator`),
-> or `0x00` packets are dropped fail-closed on the GPU path.
+> or ML-DSA (envelope) packets are dropped on the GPU path (no cheap marker to divert them).
 
 ---
 
@@ -221,8 +221,8 @@ cargo test -p solana-ml-dsa-program-tests --test fips204_vectors  # NIST FIPS 20
 node programs/ml-dsa-tests/cross-impl/check_vectors.mjs           # @noble cross-impl (needs Node; on a Windows host run from Windows)
 
 # Phase 1 — user payments
-cargo test -p solana-sdk ml_dsa_transaction --lib                 # sign/verify round-trip
-cargo test -p solana-perf sigverify                               # 0x00 routing + Ed25519 regression
+cargo test -p solana-sdk --features full ml_dsa_envelope --lib    # sign/verify + anti-lift binding
+cargo test -p solana-perf sigverify                               # envelope verify + Ed25519 regression
 cargo test -p solana-runtime test_ml_dsa_transfer_executes        # bank execution
 
 # Phase 2b — gossip
@@ -249,10 +249,10 @@ deterministic path.
 | `fips204 = "0.4.6"`                                                             | Pure-Rust FIPS 204 (MSRV 1.70 → builds on pinned 1.76); always empty context                                          |
 | `sdk/src/ml_dsa_keypair.rs`                                                     | `MlDsaKeypair`; `address = sha256(public_key)`                                                                        |
 | `sdk/src/ml_dsa_instruction.rs` · `sdk/program/src/ml_dsa_program.rs`           | Precompile verify + program id, registered in `precompiles.rs`                                                        |
-| `sdk/src/ml_dsa_transaction.rs`                                                 | `0x00`-lead-byte wire tx format; synthetic 64-byte id = `sha256(sigs)‖sha256(msg)`                                    |
+| `sdk/src/ml_dsa_envelope.rs`                                                    | Replay-safe envelope carrier: proof rides in an ML-DSA precompile instruction (anti-lift binding), re-verified on every peer's block replay |
 | `PACKET_DATA_SIZE = 8192`                                                       | Raised from 1,232; ripple-fixes in `offchain_message.rs`, `shred*.rs`, `serve_repair.rs`, `rpc.rs` base58/base64 caps |
 | `cost-model/src/block_cost_limits.rs`                                           | `ML_DSA_VERIFY_COST = 5310 CU` (~2.3× ed25519, benchmarked)                                                           |
-| `perf/src/sigverify.rs` · `core/src/banking_stage/…` · `rpc/src/rpc.rs`         | CPU sigverify + banking bridge + `sendTransaction` preflight for `0x00` packets                                       |
+| `perf/src/sigverify.rs` · `rpc/src/rpc.rs`                                      | Envelope verify fallback at TPU ingress (`verify_ml_dsa_envelope_packet`) + the `verify` / preflight fallbacks; envelope txs need no banking bridge |
 | `core/src/replay_stage.rs` · `voting_service.rs` · `gossip/src/cluster_info.rs` | ML-DSA vote construction + routing (`--ml-dsa-vote`)                                                                  |
 | `gossip/src/crds_value.rs`                                                      | `CrdsSignature::{Ed25519, MlDsa{pubkey, signature}}` enum                                                             |
 | `ledger/src/shred.rs` · `shred/merkle.rs` · `sigverify_shreds.rs`               | ML-DSA shred trailer + commitment + verify (`--ml-dsa-shred[-strict]`)                                                |
