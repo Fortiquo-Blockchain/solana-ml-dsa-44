@@ -86,6 +86,11 @@ lazy_static! {
             None, // always enabled
             crate::ed25519_instruction::verify,
         ),
+        Precompile::new(
+            crate::ml_dsa_program::id(),
+            None, // always enabled
+            crate::ml_dsa_instruction::verify,
+        ),
     ];
 }
 

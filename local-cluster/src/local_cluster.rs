@@ -46,7 +46,7 @@ use {
             instruction as stake_instruction,
             state::{Authorized, Lockup},
         },
-        system_transaction,
+        system_program, system_transaction,
         transaction::Transaction,
     },
     solana_stake_program::stake_state,
@@ -273,6 +273,78 @@ impl LocalCluster {
             .native_instruction_processors
             .extend_from_slice(&config.native_instruction_processors);
 
+        // Phase 2a (post-quantum votes): for every in-genesis validator whose config carries an
+        // ML-DSA voter, repoint its genesis vote account's authorized_voter to that key's ML-DSA
+        // address and fund the address so it can pay per-vote fees. node_pubkey stays the
+        // validator identity (replay_stage refuses to vote unless vote_state.node_pubkey ==
+        // identity). This mirrors test-validator's single-node repoint and is a no-op with no
+        // ML-DSA voters set. Only in-genesis vote accounts exist to repoint here; a voter attached
+        // to a non-genesis node would silently never vote (its vote account is created later with
+        // an Ed25519 authorized voter), so we reject that misconfiguration loudly.
+        for ((node_keypair, in_genesis), vote_keypair, validator_config) in izip!(
+            validator_keys.iter(),
+            vote_keys.iter(),
+            config.validator_configs.iter(),
+        ) {
+            let Some(ml_dsa_voter) = validator_config.ml_dsa_voter.as_ref() else {
+                continue;
+            };
+            assert!(
+                *in_genesis,
+                "validator {} carries an ml_dsa_voter but is not in genesis; its vote account \
+                 would not be repointed and it would silently fail to cast post-quantum votes",
+                node_keypair.pubkey(),
+            );
+            let ml_dsa_addr = ml_dsa_voter.address();
+            let vote_pubkey = vote_keypair.pubkey();
+            // Genesis always creates this vote account (keyed by vote_pubkey). A miss means the
+            // vote_keys/genesis keying is desynced; minting a 0-lamport vote account would surface
+            // an epoch later as an unexplained consensus stall, so fail here instead.
+            let vote_lamports = genesis_config
+                .accounts
+                .get(&vote_pubkey)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Phase 2a repoint: genesis has no vote account for vote_pubkey {vote_pubkey} \
+                         (node {}); vote_keys/genesis keying is desynced",
+                        node_keypair.pubkey(),
+                    )
+                })
+                .lamports;
+            genesis_config.accounts.insert(
+                vote_pubkey,
+                Account::from(vote_state::create_account_with_authorized(
+                    &node_keypair.pubkey(), // node_pubkey (unchanged identity)
+                    &ml_dsa_addr,           // authorized voter = post-quantum address
+                    &ml_dsa_addr,           // authorized withdrawer
+                    0,
+                    vote_lamports,
+                )),
+            );
+            // Fund the ML-DSA voter address so it can pay vote-transaction fees. Guard against
+            // clobbering an unrelated pre-existing genesis account (e.g. a caller-supplied
+            // additional_account, or the same ML-DSA key reused across two nodes).
+            debug_assert!(
+                genesis_config
+                    .accounts
+                    .get(&ml_dsa_addr)
+                    .map_or(true, |account| account.owner == system_program::id()),
+                "ML-DSA funding insert would clobber a non-system genesis account at {ml_dsa_addr}",
+            );
+            genesis_config.accounts.insert(
+                ml_dsa_addr,
+                Account::from(AccountSharedData::new(
+                    1_000_000_000_000_000, // 1M SOL
+                    0,
+                    &system_program::id(),
+                )),
+            );
+            info!(
+                "Phase 2a: ML-DSA-44 votes enabled; vote account {} authorized_voter repointed to {}",
+                vote_pubkey, ml_dsa_addr
+            );
+        }
+
         let (leader_ledger_path, _blockhash) = create_new_tmp_ledger!(&genesis_config);
         let leader_contact_info = leader_node.info.clone();
         let mut leader_config = safe_clone_config(&config.validator_configs[0]);
@@ -298,7 +370,9 @@ impl LocalCluster {
             socket_addr_space,
             DEFAULT_TPU_USE_QUIC,
             DEFAULT_TPU_CONNECTION_POOL_SIZE,
-            DEFAULT_TPU_ENABLE_UDP,
+            // ML-DSA votes ride the regular TPU over raw UDP, so enable UDP ingest when a
+            // post-quantum voter is configured (default stays QUIC-only otherwise).
+            leader_config.ml_dsa_voter.is_some() || DEFAULT_TPU_ENABLE_UDP,
             Arc::new(RwLock::new(None)),
         )
         .expect("assume successful validator start");
@@ -460,6 +534,15 @@ impl LocalCluster {
 
         // Must have enough tokens to fund vote account and set delegate
         let should_create_vote_pubkey = voting_keypair.is_none();
+        // A dynamically-created vote account gets an Ed25519 authorized voter
+        // (`setup_vote_and_stake_accounts`) that is never repointed to the ML-DSA address, so such
+        // a node would silently never cast post-quantum votes (replay_stage → NonVoting). Reject
+        // that combination loudly; PQ voters must join via in-genesis `validator_keys`.
+        assert!(
+            !(should_create_vote_pubkey && validator_config.ml_dsa_voter.is_some()),
+            "add_validator cannot host an ml_dsa_voter on a dynamically-created vote account; \
+             configure post-quantum voters as in-genesis validators instead",
+        );
         if voting_keypair.is_none() {
             voting_keypair = Some(Arc::new(Keypair::new()));
         }
@@ -513,7 +596,8 @@ impl LocalCluster {
             socket_addr_space,
             DEFAULT_TPU_USE_QUIC,
             DEFAULT_TPU_CONNECTION_POOL_SIZE,
-            DEFAULT_TPU_ENABLE_UDP,
+            // Enable UDP TPU ingest when this node casts post-quantum (raw-UDP) votes.
+            config.ml_dsa_voter.is_some() || DEFAULT_TPU_ENABLE_UDP,
             Arc::new(RwLock::new(None)),
         )
         .expect("assume successful validator start");
@@ -951,7 +1035,8 @@ impl Cluster for LocalCluster {
             socket_addr_space,
             DEFAULT_TPU_USE_QUIC,
             DEFAULT_TPU_CONNECTION_POOL_SIZE,
-            DEFAULT_TPU_ENABLE_UDP,
+            // Preserve UDP TPU ingest across restart for post-quantum (raw-UDP) voters.
+            cluster_validator_info.config.ml_dsa_voter.is_some() || DEFAULT_TPU_ENABLE_UDP,
             Arc::new(RwLock::new(None)),
         )
         .expect("assume successful validator start");

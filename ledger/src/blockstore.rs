@@ -1934,6 +1934,7 @@ impl Blockstore {
                 };
                 let (mut data_shreds, mut coding_shreds) = shredder.entries_to_shreds(
                     keypair,
+                    None, // ml_dsa_keypair
                     &current_entries,
                     true, // is_last_in_slot
                     chained_merkle_root,
@@ -1964,6 +1965,7 @@ impl Blockstore {
         if !slot_entries.is_empty() {
             let (mut data_shreds, mut coding_shreds) = shredder.entries_to_shreds(
                 keypair,
+                None, // ml_dsa_keypair
                 &slot_entries,
                 is_full_slot,
                 chained_merkle_root,
@@ -4239,6 +4241,7 @@ pub fn create_new_ledger(
     let shredder = Shredder::new(0, 0, 0, version).unwrap();
     let (shreds, _) = shredder.entries_to_shreds(
         &Keypair::new(),
+        None, // ml_dsa_keypair
         &entries,
         true, // is_last_in_slot
         // chained_merkle_root
@@ -4503,6 +4506,7 @@ pub fn entries_to_test_shreds(
         .unwrap()
         .entries_to_shreds(
             &Keypair::new(),
+            None, // ml_dsa_keypair
             entries,
             is_full_slot,
             // chained_merkle_root
@@ -5060,7 +5064,9 @@ pub mod tests {
     #[test]
     fn test_read_shred_bytes() {
         let slot = 0;
-        let (shreds, _) = make_slot_entries(slot, 0, 100, /*merkle_variant:*/ true);
+        // fork: scaled up from 100 so 8192-byte shreds still yield several data
+        // shreds (the test reads shred[0], shred[1] and shred[num_shreds-1]).
+        let (shreds, _) = make_slot_entries(slot, 0, 1000, /*merkle_variant:*/ true);
         let num_shreds = shreds.len() as u64;
         let shred_bufs: Vec<_> = shreds.iter().map(Shred::payload).cloned().collect();
 
@@ -5068,7 +5074,8 @@ pub mod tests {
         let blockstore = Blockstore::open(ledger_path.path()).unwrap();
         blockstore.insert_shreds(shreds, None, false).unwrap();
 
-        let mut buf = [0; 4096];
+        // fork: PACKET_DATA_SIZE=8192, so one shred no longer fits in 4096.
+        let mut buf = [0; 2 * PACKET_DATA_SIZE];
         let (_, bytes) = blockstore.get_data_shreds(slot, 0, 1, &mut buf).unwrap();
         assert_eq!(buf[..bytes], shred_bufs[0][..bytes]);
 
@@ -5484,7 +5491,8 @@ pub mod tests {
             ..
         } = Blockstore::open_with_signal(ledger_path.path(), BlockstoreOptions::default()).unwrap();
 
-        let entries_per_slot = 50;
+        // fork: scaled up from 50 so each slot still spans multiple 8192-byte shreds.
+        let entries_per_slot = 600;
         // Create entries for slot 0
         let (mut shreds, _) = make_slot_entries(
             0, // slot
@@ -6734,7 +6742,8 @@ pub mod tests {
     #[test]
     fn test_should_insert_data_shred() {
         solana_logger::setup();
-        let (mut shreds, _) = make_slot_entries(0, 0, 200, /*merkle_variant:*/ false);
+        // fork: scaled up from 200 so 8192-byte shreds still yield >= 9 data shreds.
+        let (mut shreds, _) = make_slot_entries(0, 0, 3000, /*merkle_variant:*/ false);
         let ledger_path = get_tmp_ledger_path_auto_delete!();
         let blockstore = Blockstore::open(ledger_path.path()).unwrap();
 
@@ -6841,7 +6850,8 @@ pub mod tests {
 
     #[test]
     fn test_is_data_shred_present() {
-        let (shreds, _) = make_slot_entries(0, 0, 200, /*merkle_variant:*/ true);
+        // fork: scaled up from 200 so 8192-byte shreds still yield >= 7 data shreds.
+        let (shreds, _) = make_slot_entries(0, 0, 3000, /*merkle_variant:*/ true);
         let ledger_path = get_tmp_ledger_path_auto_delete!();
         let blockstore = Blockstore::open(ledger_path.path()).unwrap();
         let index_cf = &blockstore.index_cf;
@@ -9825,6 +9835,7 @@ pub mod tests {
         let shredder = Shredder::new(slot, parent_slot, 0, 0).unwrap();
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             &leader_keypair,
+            None, // ml_dsa_keypair
             &entries,
             true, // is_last_in_slot
             // chained_merkle_root
@@ -9893,6 +9904,7 @@ pub mod tests {
         let chained_merkle_root = chained.then(|| Hash::new_from_array(rand::thread_rng().gen()));
         let (shreds, _) = shredder.entries_to_shreds(
             &leader_keypair,
+            None, // ml_dsa_keypair
             &entries1,
             true, // is_last_in_slot
             chained_merkle_root,
@@ -9904,6 +9916,7 @@ pub mod tests {
         );
         let (duplicate_shreds, _) = shredder.entries_to_shreds(
             &leader_keypair,
+            None, // ml_dsa_keypair
             &entries2,
             true, // is_last_in_slot
             chained_merkle_root,

@@ -1113,6 +1113,53 @@ pub fn keypair_from_seed_phrase(
     Ok(keypair)
 }
 
+/// Reads a BIP39 seed phrase (and optional passphrase) from stdin and returns the
+/// raw 64-byte BIP39 seed, for callers that derive a NON-Ed25519 key from it —
+/// e.g. the ML-DSA-44 scheme in `solana-keygen`, which uses the first 32 bytes as
+/// its FIPS 204 keygen seed (xi). Mirrors the prompting and validation of
+/// [`keypair_from_seed_phrase`] but stops at the seed instead of deriving an
+/// Ed25519 keypair, and always uses the standard (non-legacy) BIP39 derivation so
+/// the result matches `solana-keygen new --scheme mldsa44`.
+pub fn seed_from_seed_phrase(
+    keypair_name: &str,
+    skip_validation: bool,
+) -> Result<Vec<u8>, Box<dyn error::Error>> {
+    let seed_phrase = prompt_password(format!("[{keypair_name}] seed phrase: "))?;
+    let seed_phrase = seed_phrase.trim();
+    let passphrase_prompt = format!(
+        "[{keypair_name}] If this seed phrase has an associated passphrase, enter it now. Otherwise, press ENTER to continue: ",
+    );
+
+    let seed = if skip_validation {
+        let passphrase = prompt_passphrase(&passphrase_prompt)?;
+        generate_seed_from_seed_phrase_and_passphrase(seed_phrase, &passphrase)
+    } else {
+        let sanitized = sanitize_seed_phrase(seed_phrase);
+        let parse_language_fn = || {
+            for language in &[
+                Language::English,
+                Language::ChineseSimplified,
+                Language::ChineseTraditional,
+                Language::Japanese,
+                Language::Spanish,
+                Language::Korean,
+                Language::French,
+                Language::Italian,
+            ] {
+                if let Ok(mnemonic) = Mnemonic::from_phrase(&sanitized, *language) {
+                    return Ok(mnemonic);
+                }
+            }
+            Err("Can't get mnemonic from seed phrases")
+        };
+        let mnemonic = parse_language_fn()?;
+        let passphrase = prompt_passphrase(&passphrase_prompt)?;
+        Seed::new(&mnemonic, &passphrase).as_bytes().to_vec()
+    };
+
+    Ok(seed)
+}
+
 /// Reads user input from stdin to retrieve a seed phrase and passphrase for ElGamal keypair
 /// derivation.
 ///

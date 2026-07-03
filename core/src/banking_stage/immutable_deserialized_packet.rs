@@ -45,6 +45,10 @@ pub struct ImmutableDeserializedPacket {
 
 impl ImmutableDeserializedPacket {
     pub fn new(packet: Packet) -> Result<Self, DeserializedPacketError> {
+        // Post-quantum ML-DSA-44 transactions are ordinary `VersionedTransaction`s that
+        // carry their ML-DSA proof as a carrier precompile instruction (see
+        // `solana_sdk::ml_dsa_envelope`); they need no special bridge here and flow
+        // through the normal path below. Their signature was checked in sigverify.
         let versioned_transaction: VersionedTransaction = packet.deserialize_slice(..)?;
         let sanitized_transaction = SanitizedVersionedTransaction::try_from(versioned_transaction)?;
         let message_bytes = packet_message(&packet)?;
@@ -152,6 +156,33 @@ mod tests {
         super::*,
         solana_sdk::{signature::Keypair, system_transaction},
     };
+
+    #[test]
+    fn ml_dsa_envelope_deserialized_packet() {
+        use solana_sdk::{
+            ml_dsa_envelope::sign_ml_dsa_transaction, ml_dsa_keypair::MlDsaKeypair, pubkey::Pubkey,
+            system_instruction, transaction::VersionedTransaction,
+        };
+
+        // A replay-safe post-quantum payment is an ordinary VersionedTransaction (the
+        // ML-DSA proof rides in a carrier precompile instruction), so it deserializes
+        // through the normal path with no special 0x00 bridge.
+        let payer = MlDsaKeypair::new().unwrap();
+        let tx = sign_ml_dsa_transaction(
+            &[system_instruction::transfer(
+                &payer.address(),
+                &Pubkey::new_unique(),
+                1,
+            )],
+            &payer,
+            Hash::new_unique(),
+        )
+        .unwrap();
+        let packet = Packet::from_data(None, VersionedTransaction::from(tx)).unwrap();
+        let deser =
+            ImmutableDeserializedPacket::new(packet).expect("envelope packet deserializes");
+        assert!(!deser.is_simple_vote());
+    }
 
     #[test]
     fn simple_deserialized_packet() {

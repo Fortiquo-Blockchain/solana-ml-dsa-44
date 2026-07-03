@@ -31,7 +31,10 @@ use {
         rpc_subscriptions::RpcSubscriptions,
     },
     solana_runtime::{bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache},
-    solana_sdk::{clock::Slot, pubkey::Pubkey, quic::NotifyKeyUpdate, signature::Keypair},
+    solana_sdk::{
+        clock::Slot, ml_dsa_keypair::MlDsaKeypair, pubkey::Pubkey, quic::NotifyKeyUpdate,
+        signature::Keypair,
+    },
     solana_streamer::{
         nonblocking::quic::DEFAULT_WAIT_FOR_CHUNK_TIMEOUT,
         quic::{spawn_server, SpawnServerResult, MAX_STAKED_CONNECTIONS, MAX_UNSTAKED_CONNECTIONS},
@@ -102,6 +105,8 @@ impl Tpu {
         connection_cache: &Arc<ConnectionCache>,
         turbine_quic_endpoint_sender: AsyncSender<(SocketAddr, Bytes)>,
         keypair: &Keypair,
+        // fork (Phase 3): optional post-quantum ML-DSA-44 shred-signing key.
+        ml_dsa_shred: Option<Arc<MlDsaKeypair>>,
         log_messages_bytes_limit: Option<usize>,
         staked_nodes: &Arc<RwLock<StakedNodes>>,
         shared_staked_nodes_overrides: Arc<RwLock<HashMap<Pubkey, u64>>>,
@@ -262,6 +267,7 @@ impl Tpu {
             bank_forks,
             shred_version,
             turbine_quic_endpoint_sender,
+            ml_dsa_shred,
         );
 
         (

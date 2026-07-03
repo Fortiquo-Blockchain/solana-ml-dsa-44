@@ -73,6 +73,7 @@ impl BroadcastRun for BroadcastFakeShredsRun {
 
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             keypair,
+            None, // ml_dsa_keypair
             &receive_results.entries,
             last_tick_height == bank.max_tick_height(),
             Some(chained_merkle_root),
@@ -95,6 +96,7 @@ impl BroadcastRun for BroadcastFakeShredsRun {
 
         let (fake_data_shreds, fake_coding_shreds) = shredder.entries_to_shreds(
             keypair,
+            None, // ml_dsa_keypair
             &fake_entries,
             last_tick_height == bank.max_tick_height(),
             Some(chained_merkle_root),

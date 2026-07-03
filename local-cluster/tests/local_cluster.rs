@@ -5633,6 +5633,7 @@ fn test_invalid_forks_persisted_on_restart() {
             .unwrap()
             .entries_to_shreds(
                 &majority_keypair,
+                None, // ml_dsa_keypair
                 &entries,
                 true, // is_full_slot
                 None, // chained_merkle_root

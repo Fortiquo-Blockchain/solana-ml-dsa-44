@@ -16,8 +16,10 @@ use {
 static_assertions::const_assert_eq!(OffchainMessage::HEADER_LEN, 17);
 #[cfg(test)]
 static_assertions::const_assert_eq!(v0::OffchainMessage::MAX_LEN, 65515);
+// Derived from PACKET_DATA_SIZE, which this fork raises from 1232 to 8192 to
+// fit ML-DSA-44 signatures: 8192 - 17 - 3 = 8172 (was 1212 at PACKET_DATA_SIZE=1232).
 #[cfg(test)]
-static_assertions::const_assert_eq!(v0::OffchainMessage::MAX_LEN_LEDGER, 1212);
+static_assertions::const_assert_eq!(v0::OffchainMessage::MAX_LEN_LEDGER, 8172);
 
 /// Check if given bytes contain only printable ASCII characters
 pub fn is_printable_ascii(data: &[u8]) -> bool {

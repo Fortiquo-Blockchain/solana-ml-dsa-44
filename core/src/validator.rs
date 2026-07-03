@@ -109,6 +109,7 @@ use {
         exit::Exit,
         genesis_config::{ClusterType, GenesisConfig},
         hash::Hash,
+        ml_dsa_keypair::MlDsaKeypair,
         pubkey::Pubkey,
         shred_version::compute_shred_version,
         signature::{Keypair, Signer},
@@ -268,6 +269,17 @@ pub struct ValidatorConfig {
     pub use_snapshot_archives_at_startup: UseSnapshotArchivesAtStartup,
     pub wen_restart_proto_path: Option<PathBuf>,
     pub unified_scheduler_handler_threads: Option<usize>,
+    /// Phase 2: when set, consensus votes are signed with this ML-DSA-44 key (post-quantum)
+    /// instead of Ed25519. `None` = byte-for-byte unchanged Ed25519 voting.
+    pub ml_dsa_voter: Option<Arc<MlDsaKeypair>>,
+    /// Phase 3: when set, this leader additionally signs each FEC-set Merkle root with this
+    /// ML-DSA-44 key (post-quantum), carried in a per-shred trailer. `None` = unchanged
+    /// Ed25519-only shred broadcasting.
+    pub ml_dsa_shred: Option<Arc<MlDsaKeypair>>,
+    /// Phase 3: when true (--ml-dsa-shred-strict), turbine drops received ml_dsa shreds that
+    /// fail post-quantum verification. `false` = advisory/non-gating (default), so an ml_dsa
+    /// verification gap can never stall the node.
+    pub ml_dsa_shred_strict: bool,
 }
 
 impl Default for ValidatorConfig {
@@ -336,6 +348,9 @@ impl Default for ValidatorConfig {
             use_snapshot_archives_at_startup: UseSnapshotArchivesAtStartup::default(),
             wen_restart_proto_path: None,
             unified_scheduler_handler_threads: None,
+            ml_dsa_voter: None,
+            ml_dsa_shred: None,
+            ml_dsa_shred_strict: false,
         }
     }
 }
@@ -1269,6 +1284,7 @@ impl Validator {
         let tvu = Tvu::new(
             vote_account,
             authorized_voter_keypairs,
+            config.ml_dsa_voter.clone(),
             &bank_forks,
             &cluster_info,
             TvuSockets {
@@ -1306,6 +1322,7 @@ impl Validator {
                 repair_whitelist: config.repair_whitelist.clone(),
                 wait_for_vote_to_start_leader,
                 replay_slots_concurrently: config.replay_slots_concurrently,
+                ml_dsa_shred_strict: config.ml_dsa_shred_strict,
             },
             &max_slots,
             block_metadata_notifier,
@@ -1374,6 +1391,7 @@ impl Validator {
             &connection_cache,
             turbine_quic_endpoint_sender,
             &identity_keypair,
+            config.ml_dsa_shred.clone(),
             config.runtime_config.log_messages_bytes_limit,
             &staked_nodes,
             config.staked_nodes_overrides.clone(),

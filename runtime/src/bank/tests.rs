@@ -334,6 +334,61 @@ fn test_bank_block_height() {
     assert_eq!(bank1.block_height(), 1);
 }
 
+// Phase 1: a transaction whose fee payer signs with ML-DSA-44 (post-quantum) and
+// whose address is sha256(public key) executes and moves lamports. The runtime
+// keys on a synthetic 64-byte id; execution does not re-verify signatures (that
+// happens in sigverify), so the Ed25519 runtime path is untouched.
+#[test]
+fn test_ml_dsa_transfer_executes() {
+    use solana_sdk::{ml_dsa_envelope::sign_ml_dsa_transaction, ml_dsa_keypair::MlDsaKeypair};
+
+    // Wrapped in bank-forks so the program cache's fork graph is initialized.
+    let bank = create_simple_test_arc_bank(0).0;
+
+    // Fund the post-quantum fee payer's address (a normal 32-byte Pubkey).
+    let payer = MlDsaKeypair::new().unwrap();
+    let start = 2 * solana_sdk::native_token::LAMPORTS_PER_SOL;
+    bank.store_account(
+        &payer.address(),
+        &solana_sdk::account::AccountSharedData::new(start, 0, &solana_sdk::system_program::id()),
+    );
+
+    let recipient = solana_sdk::pubkey::Pubkey::new_unique();
+    let amount = solana_sdk::native_token::LAMPORTS_PER_SOL;
+
+    // Replay-safe post-quantum payment: a standard transaction whose sole signer (the
+    // ML-DSA address) is authorized by an appended ML-DSA carrier precompile.
+    let tx = sign_ml_dsa_transaction(
+        &[solana_sdk::system_instruction::transfer(
+            &payer.address(),
+            &recipient,
+            amount,
+        )],
+        &payer,
+        bank.last_blockhash(),
+    )
+    .unwrap();
+    let versioned = solana_sdk::transaction::VersionedTransaction::from(tx);
+
+    // The carrier authorizes the ML-DSA signer through the same verification a peer
+    // runs on replay.
+    assert!(
+        versioned.verify_and_hash_message().is_ok(),
+        "envelope ML-DSA payment must verify"
+    );
+    let signature = versioned.signatures[0];
+    let _ = bank.process_transaction_with_metadata(versioned);
+
+    assert_eq!(
+        bank.get_signature_status(&signature),
+        Some(Ok(())),
+        "ML-DSA transfer should execute successfully"
+    );
+    assert_eq!(bank.get_balance(&recipient), amount);
+    // Fee payer was debited the transfer amount (plus any fee; test genesis fee is 0).
+    assert!(bank.get_balance(&payer.address()) <= start - amount);
+}
+
 #[test]
 fn test_bank_update_epoch_stakes() {
     impl Bank {

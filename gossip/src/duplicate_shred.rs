@@ -407,6 +407,7 @@ pub(crate) mod tests {
         .collect();
         shredder.entries_to_shreds(
             keypair,
+            None, // ml_dsa_keypair
             &entries,
             is_last_in_slot,
             // chained_merkle_root
@@ -812,10 +813,16 @@ pub(crate) mod tests {
                 None
             }
         };
+        // fork: these three entry counts must yield *different* erasure configs
+        // for there to be a real erasure-meta conflict to prove. At the old 1232
+        // packet, 10/13/7 entries produced 3/4/2 data shreds; at 8192 they all
+        // collapse to a single data shred (identical erasure meta), so from_shred
+        // correctly reports no conflict. The counts are scaled ~31x to restore
+        // distinct data-shred counts.
         let coding_shreds = new_rand_coding_shreds(
             &mut rng,
             next_shred_index,
-            10,
+            310,
             &shredder,
             &leader,
             merkle_variant,
@@ -823,7 +830,7 @@ pub(crate) mod tests {
         let coding_shreds_bigger = new_rand_coding_shreds(
             &mut rng,
             next_shred_index,
-            13,
+            403,
             &shredder,
             &leader,
             merkle_variant,
@@ -831,10 +838,29 @@ pub(crate) mod tests {
         let coding_shreds_smaller = new_rand_coding_shreds(
             &mut rng,
             next_shred_index,
-            7,
+            217,
             &shredder,
             &leader,
             merkle_variant,
+        );
+
+        // Precondition: the base set is non-empty (indexed [0]), bigger/smaller
+        // have >=2 (indexed [1]), and the three erasure configs differ. Differing
+        // coding-shred counts is a valid proxy for differing erasure meta only
+        // while every set stays within a single FEC block (<32 data shreds, true
+        // at these counts). Asserted loudly so a future packet-size change fails
+        // here instead of with a confusing InvalidErasureMetaConflict below.
+        assert!(
+            !coding_shreds.is_empty()
+                && coding_shreds_bigger.len() >= 2
+                && coding_shreds_smaller.len() >= 2
+                && coding_shreds.len() != coding_shreds_bigger.len()
+                && coding_shreds.len() != coding_shreds_smaller.len(),
+            "coding sets need base>=1, bigger/smaller>=2, and differing erasure \
+             configs (got {}, {}, {}); bump entry counts for this packet size",
+            coding_shreds.len(),
+            coding_shreds_bigger.len(),
+            coding_shreds_smaller.len(),
         );
 
         // Same fec-set, different index, different erasure meta
@@ -970,11 +996,14 @@ pub(crate) mod tests {
             }
         };
 
+        // fork: at PACKET_DATA_SIZE=8192, 10 entries collapse to a single data
+        // shred, making the `[1]` indexing below panic. Scaled up so each slot
+        // yields several shreds.
         let (data_shreds, coding_shreds) = new_rand_shreds(
             &mut rng,
             next_shred_index,
             next_shred_index,
-            10,
+            200,
             true, /* merkle_variant */
             &shredder,
             &leader,
@@ -985,7 +1014,7 @@ pub(crate) mod tests {
             &mut rng,
             next_shred_index,
             next_shred_index,
-            10,
+            200,
             false, /* merkle_variant */
             &shredder,
             &leader,
@@ -996,11 +1025,24 @@ pub(crate) mod tests {
             &mut rng,
             next_shred_index,
             next_shred_index,
-            10,
+            200,
             true, /* merkle_variant */
             &shredder,
             &leader,
             false,
+        );
+
+        // Precondition, asserted loudly so a future packet-size change fails here
+        // rather than with a cryptic out-of-bounds panic in the test cases below.
+        assert!(
+            diff_data_shreds.len() >= 2
+                && diff_coding_shreds.len() >= 2
+                && !data_shreds.is_empty()
+                && !coding_shreds.is_empty()
+                && !legacy_data_shreds.is_empty()
+                && !legacy_coding_shreds.is_empty(),
+            "need >=2 shreds in the diff sets and non-empty base/legacy sets; \
+             bump entry counts for this packet size"
         );
 
         let test_cases = vec![

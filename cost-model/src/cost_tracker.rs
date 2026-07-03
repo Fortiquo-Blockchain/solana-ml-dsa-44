@@ -61,6 +61,7 @@ pub struct CostTracker {
     transaction_signature_count: u64,
     secp256k1_instruction_signature_count: u64,
     ed25519_instruction_signature_count: u64,
+    ml_dsa_instruction_signature_count: u64,
 }
 
 impl Default for CostTracker {
@@ -83,6 +84,7 @@ impl Default for CostTracker {
             transaction_signature_count: 0,
             secp256k1_instruction_signature_count: 0,
             ed25519_instruction_signature_count: 0,
+            ml_dsa_instruction_signature_count: 0,
         }
     }
 }
@@ -174,6 +176,11 @@ impl CostTracker {
                 self.ed25519_instruction_signature_count,
                 i64
             ),
+            (
+                "ml_dsa_instruction_signature_count",
+                self.ml_dsa_instruction_signature_count,
+                i64
+            ),
         );
     }
 
@@ -246,6 +253,10 @@ impl CostTracker {
             self.ed25519_instruction_signature_count,
             tx_cost.num_ed25519_instruction_signatures()
         );
+        saturating_add_assign!(
+            self.ml_dsa_instruction_signature_count,
+            tx_cost.num_ml_dsa_instruction_signatures()
+        );
     }
 
     fn remove_transaction_cost(&mut self, tx_cost: &TransactionCost) {
@@ -264,6 +275,9 @@ impl CostTracker {
         self.ed25519_instruction_signature_count = self
             .ed25519_instruction_signature_count
             .saturating_sub(tx_cost.num_ed25519_instruction_signatures());
+        self.ml_dsa_instruction_signature_count = self
+            .ml_dsa_instruction_signature_count
+            .saturating_sub(tx_cost.num_ml_dsa_instruction_signatures());
     }
 
     /// Apply additional actual execution units to cost_tracker

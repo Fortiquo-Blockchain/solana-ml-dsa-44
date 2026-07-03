@@ -231,17 +231,40 @@ impl SanitizedTransaction {
     /// Verify the transaction signatures
     pub fn verify(&self) -> Result<()> {
         let message_bytes = self.message_data();
-        if self
+        let ed25519_ok = self
             .signatures
             .iter()
             .zip(self.message.account_keys().iter())
-            .map(|(signature, pubkey)| signature.verify(pubkey.as_ref(), &message_bytes))
-            .any(|verified| !verified)
-        {
-            Err(TransactionError::SignatureFailure)
-        } else {
+            .all(|(signature, pubkey)| signature.verify(pubkey.as_ref(), &message_bytes));
+        if ed25519_ok || self.verify_ml_dsa_envelope() {
             Ok(())
+        } else {
+            Err(TransactionError::SignatureFailure)
         }
+    }
+
+    /// Fallback for a post-quantum ML-DSA-44 transaction whose sole signer is
+    /// authorized by a carrier precompile instruction (see [`crate::ml_dsa_envelope`]);
+    /// inert for ordinary transactions. Mirrors the fallback in
+    /// `VersionedTransaction::verify_and_hash_message`, so the RPC/simulation path
+    /// (which verifies a `SanitizedTransaction`) accepts the same PQ transactions the
+    /// replay path does.
+    #[cfg(feature = "full")]
+    fn verify_ml_dsa_envelope(&self) -> bool {
+        match &self.message {
+            SanitizedMessage::Legacy(legacy_message) => {
+                crate::ml_dsa_envelope::verify_ml_dsa_envelope(
+                    &legacy_message.message,
+                    &self.signatures,
+                )
+            }
+            SanitizedMessage::V0(_) => false,
+        }
+    }
+
+    #[cfg(not(feature = "full"))]
+    fn verify_ml_dsa_envelope(&self) -> bool {
+        false
     }
 
     /// Verify the precompiled programs in this transaction

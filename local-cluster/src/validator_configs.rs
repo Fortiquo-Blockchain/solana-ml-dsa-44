@@ -69,6 +69,9 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         use_snapshot_archives_at_startup: config.use_snapshot_archives_at_startup,
         wen_restart_proto_path: config.wen_restart_proto_path.clone(),
         unified_scheduler_handler_threads: config.unified_scheduler_handler_threads,
+        ml_dsa_voter: config.ml_dsa_voter.clone(),
+        ml_dsa_shred: config.ml_dsa_shred.clone(),
+        ml_dsa_shred_strict: config.ml_dsa_shred_strict,
     }
 }
 

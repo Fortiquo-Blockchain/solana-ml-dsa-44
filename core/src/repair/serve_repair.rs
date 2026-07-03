@@ -70,7 +70,7 @@ pub(crate) const REPAIR_PEERS_CACHE_CAPACITY: usize = 128;
 const REPAIR_PEERS_CACHE_TTL: Duration = Duration::from_secs(10);
 
 #[cfg(test)]
-static_assertions::const_assert_eq!(MAX_ANCESTOR_BYTES_IN_PACKET, 1220);
+static_assertions::const_assert_eq!(MAX_ANCESTOR_BYTES_IN_PACKET, 8180);
 pub const MAX_ANCESTOR_BYTES_IN_PACKET: usize =
     PACKET_DATA_SIZE -
     SIZE_OF_NONCE -
@@ -89,7 +89,7 @@ pub(crate) const REPAIR_RESPONSE_SERIALIZED_PING_BYTES: usize =
 const SIGNED_REPAIR_TIME_WINDOW: Duration = Duration::from_secs(60 * 10); // 10 min
 
 #[cfg(test)]
-static_assertions::const_assert_eq!(MAX_ANCESTOR_RESPONSES, 30);
+static_assertions::const_assert_eq!(MAX_ANCESTOR_RESPONSES, 204);
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum ShredRepairType {

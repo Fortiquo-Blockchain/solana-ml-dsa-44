@@ -115,7 +115,21 @@ const MAX_GOSSIP_TRAFFIC: usize = 128_000_000 / PACKET_DATA_SIZE;
 /// is equal to PACKET_DATA_SIZE minus serialized size of an empty push
 /// message: Protocol::PushMessage(Pubkey::default(), Vec::default())
 const PUSH_MESSAGE_MAX_PAYLOAD_SIZE: usize = PACKET_DATA_SIZE - 44;
-pub(crate) const DUPLICATE_SHRED_MAX_PAYLOAD_SIZE: usize = PACKET_DATA_SIZE - 115;
+/// Max serialized size of each DuplicateShred, chosen so that a DuplicateShred
+/// crds-value wrapped in a Protocol::PushMessage / PullResponse stays below
+/// PACKET_DATA_SIZE. The reserved 119 bytes is the wire overhead around the
+/// DuplicateShred: Protocol discriminant (4) + origin pubkey (32) + Vec length
+/// (8) + CrdsValue signature (CrdsSignature::Ed25519 = 4-byte discriminant + 64)
+/// + CrdsData discriminant (4) + DuplicateShred index u16 (2) = 118, plus 1 byte
+/// of slack. Upstream reserved 115 for a bare 64-byte Signature; the ML-DSA
+/// CrdsSignature enum adds a 4-byte discriminant, so the reserve grew by 4.
+/// Guarded by `test_duplicate_shred_max_payload_size` (which serializes a full
+/// max-size chunk and asserts it fits), so this can never silently drift. NOTE:
+/// this reserve — and that guard test, which signs Ed25519 — assume duplicate-
+/// shred crds values are Ed25519-signed (as they are today). If they are ever
+/// ML-DSA-signed, the `CrdsSignature::MlDsa` variant is ~3.7 KB (not 68 bytes),
+/// so both this constant and the guard test must be revisited.
+pub(crate) const DUPLICATE_SHRED_MAX_PAYLOAD_SIZE: usize = PACKET_DATA_SIZE - 119;
 /// Maximum number of hashes in AccountsHashes a node publishes
 /// such that the serialized size of the push/pull message stays below
 /// PACKET_DATA_SIZE.
@@ -125,7 +139,11 @@ pub const MAX_ACCOUNTS_HASHES: usize = 16;
 /// PACKET_DATA_SIZE.
 pub const MAX_INCREMENTAL_SNAPSHOT_HASHES: usize = 25;
 /// Maximum number of origin nodes that a PruneData may contain, such that the
-/// serialized size of the PruneMessage stays below PACKET_DATA_SIZE.
+/// serialized size of the PruneMessage stays below PACKET_DATA_SIZE. This is a
+/// deliberate cap, not a packet-maximal value: the fork raised PACKET_DATA_SIZE
+/// to 8192, so many more than 32 would now fit, but 32 is kept to bound
+/// prune-message size and preserve upstream gossip behavior. `test_max_prune_
+/// data_pubkeys` guards that 32 still fits in a packet.
 const MAX_PRUNE_DATA_NODES: usize = 32;
 /// Number of bytes in the randomly generated token sent with ping messages.
 const GOSSIP_PING_TOKEN_SIZE: usize = 32;
@@ -1012,6 +1030,26 @@ impl ClusterInfo {
             .push(message);
     }
 
+    /// Gossip a `CrdsValue` that was signed elsewhere — e.g. by an ML-DSA-44
+    /// post-quantum identity via [`CrdsValue::new_signed_ml_dsa`] — queuing it for
+    /// push to peers exactly like the node's own values. Phase 2b: lets a node
+    /// relay a post-quantum-signed CRDS value across real gossip without changing
+    /// the node's own (Ed25519) identity.
+    ///
+    /// Rejects (and logs) an unverifiable value: it would otherwise be queued and
+    /// then silently dropped by every peer's sigverify, wasting bandwidth with no
+    /// signal at the producer.
+    pub fn push_signed_crds_value(&self, value: CrdsValue) {
+        if !value.verify() {
+            error!(
+                "refusing to gossip unverifiable CrdsValue {:?}; peers would drop it",
+                value.label()
+            );
+            return;
+        }
+        self.push_message(value);
+    }
+
     pub fn push_snapshot_hashes(
         &self,
         full: (Slot, Hash),
@@ -1145,6 +1183,20 @@ impl ClusterInfo {
             .unwrap_or_else(|| self.my_contact_info().tpu(contact_info::Protocol::UDP))?;
         let buf = serialize(transaction)?;
         self.socket.send_to(&buf, tpu)?;
+        Ok(())
+    }
+
+    /// Send already-serialized transaction wire bytes (e.g. a post-quantum ML-DSA `0x00`
+    /// transaction) to a TPU. `None` targets this node's own regular (non-vote) TPU.
+    pub fn send_transaction_raw(
+        &self,
+        wire: &[u8],
+        tpu: Option<SocketAddr>,
+    ) -> Result<(), GossipError> {
+        let tpu = tpu
+            .map(Ok)
+            .unwrap_or_else(|| self.my_contact_info().tpu(contact_info::Protocol::UDP))?;
+        self.socket.send_to(wire, tpu)?;
         Ok(())
     }
 
@@ -3412,16 +3464,25 @@ mod tests {
             let prune_data =
                 PruneData::new_rand(&mut rng, &self_keypair, Some(MAX_PRUNE_DATA_NODES));
             let prune_message = Protocol::PruneMessage(self_keypair.pubkey(), prune_data);
+            // Upstream asserted MAX_PRUNE_DATA_NODES was the *largest* count that
+            // fits a packet (MAX_PRUNE_DATA_NODES + 1 would not). The fork raised
+            // PACKET_DATA_SIZE to 8192, so 33+ now fit and that maximality check
+            // is gone; 32 is a deliberate cap (see the constant), not packet-
+            // maximal. Guard the cap instead with a documented margin: a
+            // MAX_PRUNE_DATA_NODES prune message must fit comfortably inside a
+            // packet (< half). This measured-size check (unlike a bare
+            // Packet::from_data fits-check) fails loudly if the cap is bumped
+            // toward the packet limit or PruneData's wire size balloons, rather
+            // than only at the boundary.
+            let size = serialized_size(&prune_message).unwrap() as usize;
+            assert!(
+                size * 2 < PACKET_DATA_SIZE,
+                "MAX_PRUNE_DATA_NODES prune message is {size} B, not < half of \
+                 PACKET_DATA_SIZE ({PACKET_DATA_SIZE})"
+            );
             let socket = new_rand_socket_addr(&mut rng);
             assert!(Packet::from_data(Some(&socket), prune_message).is_ok());
         }
-        // Assert that MAX_PRUNE_DATA_NODES is highest possible.
-        let self_keypair = Keypair::new();
-        let prune_data =
-            PruneData::new_rand(&mut rng, &self_keypair, Some(MAX_PRUNE_DATA_NODES + 1));
-        let prune_message = Protocol::PruneMessage(self_keypair.pubkey(), prune_data);
-        let socket = new_rand_socket_addr(&mut rng);
-        assert!(Packet::from_data(Some(&socket), prune_message).is_err());
     }
 
     #[test]

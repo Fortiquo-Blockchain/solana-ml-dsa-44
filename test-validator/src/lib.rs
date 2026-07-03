@@ -48,15 +48,18 @@ use {
         hash::Hash,
         instruction::{AccountMeta, Instruction},
         message::Message,
+        ml_dsa_keypair::MlDsaKeypair,
         native_token::sol_to_lamports,
         pubkey::Pubkey,
         rent::Rent,
         signature::{read_keypair_file, write_keypair_file, Keypair, Signer},
+        system_program,
     },
     solana_streamer::socket::SocketAddrSpace,
     solana_tpu_client::tpu_client::{
         DEFAULT_TPU_CONNECTION_POOL_SIZE, DEFAULT_TPU_ENABLE_UDP, DEFAULT_TPU_USE_QUIC,
     },
+    solana_vote_program::vote_state,
     std::{
         collections::{HashMap, HashSet},
         ffi::OsStr,
@@ -136,6 +139,15 @@ pub struct TestValidatorGenesis {
     pub validator_exit: Arc<RwLock<Exit>>,
     pub start_progress: Arc<RwLock<ValidatorStartProgress>>,
     pub authorized_voter_keypairs: Arc<RwLock<Vec<Arc<Keypair>>>>,
+    /// Phase 2: when set, the genesis vote account's authorized_voter is this key's
+    /// (Ed25519-shaped) address and consensus votes are signed with ML-DSA-44.
+    pub ml_dsa_voter: Option<Arc<MlDsaKeypair>>,
+    /// Phase 3: when set, this validator additionally signs each FEC-set Merkle root with
+    /// this ML-DSA-44 key (post-quantum) when broadcasting shreds as leader.
+    pub ml_dsa_shred: Option<Arc<MlDsaKeypair>>,
+    /// Phase 3: when true, turbine drops received ml_dsa shreds that fail post-quantum
+    /// verification (default false = advisory/non-gating).
+    pub ml_dsa_shred_strict: bool,
     pub staked_nodes_overrides: Arc<RwLock<HashMap<Pubkey, u64>>>,
     pub max_ledger_shreds: Option<u64>,
     pub max_genesis_archive_unpacked_size: Option<u64>,
@@ -170,6 +182,9 @@ impl Default for TestValidatorGenesis {
             validator_exit: Arc::<RwLock<Exit>>::default(),
             start_progress: Arc::<RwLock<ValidatorStartProgress>>::default(),
             authorized_voter_keypairs: Arc::<RwLock<Vec<Arc<Keypair>>>>::default(),
+            ml_dsa_voter: None,
+            ml_dsa_shred: None,
+            ml_dsa_shred_strict: false,
             staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
             max_ledger_shreds: Option::<u64>::default(),
             max_genesis_archive_unpacked_size: Option::<u64>::default(),
@@ -201,6 +216,28 @@ impl TestValidatorGenesis {
 
     pub fn tower_storage(&mut self, tower_storage: Arc<dyn TowerStorage>) -> &mut Self {
         self.tower_storage = Some(tower_storage);
+        self
+    }
+
+    /// Phase 2: sign this validator's consensus votes with ML-DSA-44 (post-quantum)
+    /// instead of Ed25519. The genesis vote account's authorized_voter is set to the
+    /// key's address and that address is funded to pay vote-tx fees.
+    pub fn ml_dsa_voter(&mut self, ml_dsa_voter: Arc<MlDsaKeypair>) -> &mut Self {
+        self.ml_dsa_voter = Some(ml_dsa_voter);
+        self
+    }
+
+    /// Phase 3: sign this validator's broadcast shreds with ML-DSA-44 (post-quantum)
+    /// in addition to Ed25519, so upgraded peers can post-quantum-verify its blocks.
+    pub fn ml_dsa_shred(&mut self, ml_dsa_shred: Arc<MlDsaKeypair>) -> &mut Self {
+        self.ml_dsa_shred = Some(ml_dsa_shred);
+        self
+    }
+
+    /// Phase 3: when true, turbine drops received ML-DSA-44 shreds that fail post-quantum
+    /// verification (default false = advisory/non-gating).
+    pub fn ml_dsa_shred_strict(&mut self, ml_dsa_shred_strict: bool) -> &mut Self {
+        self.ml_dsa_shred_strict = ml_dsa_shred_strict;
         self
     }
 
@@ -791,6 +828,43 @@ impl TestValidator {
             genesis_config.ticks_per_slot = ticks_per_slot;
         }
 
+        // Phase 2 (post-quantum votes): if an ML-DSA voter is configured, repoint the genesis
+        // vote account's authorized_voter to that key's (Ed25519-shaped) address, and fund the
+        // address so it can pay the vote-transaction fee. node_pubkey stays the validator
+        // identity (replay_stage asserts vote_state.node_pubkey == identity).
+        if let Some(ml_dsa_voter) = &config.ml_dsa_voter {
+            let ml_dsa_addr = ml_dsa_voter.address();
+            let vote_pubkey = validator_vote_account.pubkey();
+            let vote_lamports = genesis_config
+                .accounts
+                .get(&vote_pubkey)
+                .map(|a| a.lamports)
+                .unwrap_or(validator_stake_lamports);
+            let new_vote_account = vote_state::create_account_with_authorized(
+                &validator_identity.pubkey(), // node_pubkey (unchanged)
+                &ml_dsa_addr,                 // authorized voter = post-quantum address
+                &ml_dsa_addr,                 // authorized withdrawer
+                0,
+                vote_lamports,
+            );
+            genesis_config
+                .accounts
+                .insert(vote_pubkey, Account::from(new_vote_account));
+            // Fund the ML-DSA voter address so it can pay vote-tx fees.
+            genesis_config.accounts.insert(
+                ml_dsa_addr,
+                Account::from(AccountSharedData::new(
+                    sol_to_lamports(1_000_000.),
+                    0,
+                    &system_program::id(),
+                )),
+            );
+            info!(
+                "Phase 2: ML-DSA-44 votes enabled; vote account {} authorized_voter set to {}",
+                vote_pubkey, ml_dsa_addr
+            );
+        }
+
         // Remove features tagged to deactivate
         for deactivate_feature_pk in &config.deactivate_feature_set {
             if FEATURE_NAMES.contains_key(deactivate_feature_pk) {
@@ -971,6 +1045,20 @@ impl TestValidator {
         if let Some(ref tower_storage) = config.tower_storage {
             validator_config.tower_storage = tower_storage.clone();
         }
+        // Phase 2: thread the ML-DSA voter key into the validator so ReplayStage signs
+        // votes with it (None = unchanged Ed25519 voting).
+        validator_config.ml_dsa_voter = config.ml_dsa_voter.clone();
+        // Phase 3: thread the ML-DSA shred key into the validator so the broadcast stage
+        // post-quantum-signs shreds as leader (None = unchanged Ed25519 broadcasting).
+        validator_config.ml_dsa_shred = config.ml_dsa_shred.clone();
+        // Phase 3: thread the strict-verify flag so turbine drops failing ml_dsa shreds.
+        validator_config.ml_dsa_shred_strict = config.ml_dsa_shred_strict;
+
+        // Phase 2: ML-DSA votes are submitted as raw 0x00 UDP packets to the node's own
+        // regular TPU (they cannot ride gossip CRDS or the vote-only port). The regular TPU
+        // only ingests UDP when tpu_enable_udp is on (default off = QUIC only), so force it
+        // on when post-quantum voting is enabled, otherwise the votes never reach banking.
+        let tpu_enable_udp = config.tpu_enable_udp || config.ml_dsa_voter.is_some();
 
         let validator = Some(Validator::new(
             node,
@@ -986,7 +1074,7 @@ impl TestValidator {
             socket_addr_space,
             DEFAULT_TPU_USE_QUIC,
             DEFAULT_TPU_CONNECTION_POOL_SIZE,
-            config.tpu_enable_udp,
+            tpu_enable_udp,
             config.admin_rpc_service_post_init.clone(),
         )?);
 

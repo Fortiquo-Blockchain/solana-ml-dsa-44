@@ -144,12 +144,58 @@ fn verify_packet(packet: &mut Packet, reject_non_vote: bool) -> bool {
             return false;
         };
         if !signature.verify(pubkey, message) {
-            return false;
+            // A replay-safe post-quantum transaction is a standard transaction whose
+            // signer is authorized by an ML-DSA carrier precompile instruction rather
+            // than an Ed25519 envelope signature, so its placeholder signature fails
+            // classic verification. Fall back to the shared envelope check (regular
+            // TPU only; these are never vote-only-port packets). See
+            // `solana_sdk::ml_dsa_envelope`.
+            return !reject_non_vote && verify_ml_dsa_envelope_packet(packet);
         }
         pubkey_start = pubkey_end;
         sig_start = sig_end;
     }
     true
+}
+
+/// CPU verification of a replay-safe post-quantum transaction packet (a standard
+/// transaction carrying an ML-DSA carrier precompile instruction). The crypto and
+/// the transaction-binding check live in `solana_sdk::ml_dsa_envelope` so there is a
+/// single implementation shared by sigverify, banking, and replay.
+///
+/// ⚠️ GPU CAVEAT (liveness): this fallback runs ONLY from the per-packet CPU path
+/// (`ed25519_verify_cpu` → `verify_packet`). An envelope packet has no cheap marker,
+/// so on a perf-libs/GPU node it is handed to the CUDA Ed25519 kernel, fails on the
+/// placeholder signature, and is **dropped at ingress** (it is NOT verified on the
+/// CPU there). Replay is unaffected (it always uses the uniform CPU
+/// `verify_and_hash_message`), so this is a leader-side liveness constraint, not a
+/// consensus split: run this fork with GPU sigverify OFF until the deferred GPU work
+/// (remaining-work B2) adds detection or a kernel.
+///
+/// ⚠️ DoS: this fires for EVERY packet whose Ed25519 signature fails (on the regular
+/// TPU), each paying a `bincode` deserialize and — for a structurally valid carrier
+/// an attacker can craft (`account_keys[0] = sha256(their_pubkey)`) — a full ML-DSA
+/// verify. That is a new attacker-triggerable CPU cost versus stock Solana (which
+/// just drops a sig-failed packet). Acceptable for a self-hosted fork; a cheap
+/// pre-filter is future work.
+#[must_use]
+fn verify_ml_dsa_envelope_packet(packet: &Packet) -> bool {
+    use solana_sdk::{
+        message::VersionedMessage, ml_dsa_envelope::verify_ml_dsa_envelope,
+        transaction::VersionedTransaction,
+    };
+    inc_new_counter_debug!("sigverify_ml_dsa_envelope_fallback", 1);
+    let Some(data) = packet.data(..) else {
+        return false;
+    };
+    let Ok(tx) = bincode::deserialize::<VersionedTransaction>(data) else {
+        inc_new_counter_debug!("sigverify_ml_dsa_envelope_deser_fail", 1);
+        return false;
+    };
+    match &tx.message {
+        VersionedMessage::Legacy(message) => verify_ml_dsa_envelope(message, &tx.signatures),
+        VersionedMessage::V0(_) => false,
+    }
 }
 
 pub fn count_packets_in_batches(batches: &[PacketBatch]) -> usize {
@@ -608,6 +654,12 @@ pub fn ed25519_verify(
     let Some(api) = perf_libs::api() else {
         return ed25519_verify_cpu(batches, reject_non_vote, valid_packet_count);
     };
+
+    // NOTE: replay-safe post-quantum (ML-DSA envelope) packets are only verified on
+    // the CPU path (`verify_packet`'s envelope fallback). They have no cheap marker,
+    // so — unlike the removed `0x00` diversion — this GPU path does not detect them
+    // and would drop them on the CUDA kernel. Run with GPU sigverify off until the
+    // deferred GPU work (remaining-work B2). See `verify_ml_dsa_envelope_packet`.
     let total_packet_count = count_packets_in_batches(batches);
     // micro-benchmarks show GPU time for smallest batch around 15-20ms
     // and CPU speed for 64-128 sigverifies around 10-20ms. 64 is a nice
@@ -839,6 +891,54 @@ mod tests {
 
         let res = sigverify::do_get_packet_offsets(&packet, 0);
         assert_eq!(res, Err(PacketError::InvalidLen));
+    }
+
+    #[test]
+    fn test_verify_ml_dsa_envelope_packet() {
+        use solana_sdk::{
+            hash::Hash,
+            ml_dsa_envelope::sign_ml_dsa_transaction,
+            ml_dsa_keypair::MlDsaKeypair,
+            signature::{Keypair, Signer},
+            system_instruction,
+            transaction::VersionedTransaction,
+        };
+
+        let payer = MlDsaKeypair::new().unwrap();
+        let ixs = [system_instruction::transfer(
+            &payer.address(),
+            &Pubkey::new_unique(),
+            1_000,
+        )];
+        let tx = sign_ml_dsa_transaction(&ixs, &payer, Hash::new_unique()).unwrap();
+        let wire = bincode::serialize(&VersionedTransaction::from(tx.clone())).unwrap();
+
+        let make_packet = |bytes: &[u8]| {
+            let mut packet = Packet::from_data(None, 0u8).unwrap();
+            packet.buffer_mut()[..bytes.len()].copy_from_slice(bytes);
+            packet.meta_mut().size = bytes.len();
+            packet
+        };
+
+        // A valid envelope packet verifies on the regular TPU path (reject_non_vote=false).
+        let mut packet = make_packet(&wire);
+        assert!(verify_packet(&mut packet, false));
+
+        // Vote-only mode (reject_non_vote=true) drops it: the fallback is gated off,
+        // which is why ML-DSA votes must ride the regular TPU (see `verify_packet`).
+        let mut packet = make_packet(&wire);
+        assert!(!verify_packet(&mut packet, true));
+
+        // A forged envelope (signer swapped so sha256(pubkey) != account_keys[0]) is rejected.
+        let mut forged = tx;
+        forged.message.account_keys[0] = Keypair::new().pubkey();
+        let forged_wire = bincode::serialize(&VersionedTransaction::from(forged)).unwrap();
+        let mut packet = make_packet(&forged_wire);
+        assert!(!verify_packet(&mut packet, false));
+
+        // Garbage that fails Ed25519 and does not deserialize is dropped by the fallback.
+        let mut packet = make_packet(&[1u8; 200]);
+        assert!(!verify_packet(&mut packet, false));
     }
 
     #[test]

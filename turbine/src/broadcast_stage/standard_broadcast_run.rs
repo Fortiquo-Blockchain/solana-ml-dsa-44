@@ -16,6 +16,7 @@ use {
     solana_sdk::{
         genesis_config::ClusterType,
         hash::Hash,
+        ml_dsa_keypair::MlDsaKeypair,
         signature::Keypair,
         timing::{duration_as_us, AtomicInterval},
     },
@@ -36,6 +37,10 @@ pub struct StandardBroadcastRun {
     num_batches: usize,
     cluster_nodes_cache: Arc<ClusterNodesCache<BroadcastStage>>,
     reed_solomon_cache: Arc<ReedSolomonCache>,
+    // fork (Phase 3): when set, this leader additionally signs each FEC-set
+    // Merkle root with this post-quantum ML-DSA-44 key (carried in a per-shred
+    // trailer). None preserves the unchanged Ed25519-only broadcast path.
+    ml_dsa: Option<Arc<MlDsaKeypair>>,
 }
 
 #[derive(Debug)]
@@ -44,7 +49,7 @@ enum BroadcastError {
 }
 
 impl StandardBroadcastRun {
-    pub(super) fn new(shred_version: u16) -> Self {
+    pub(super) fn new(shred_version: u16, ml_dsa: Option<Arc<MlDsaKeypair>>) -> Self {
         let cluster_nodes_cache = Arc::new(ClusterNodesCache::<BroadcastStage>::new(
             CLUSTER_NODES_CACHE_NUM_EPOCH_CAP,
             CLUSTER_NODES_CACHE_TTL,
@@ -61,6 +66,7 @@ impl StandardBroadcastRun {
             num_batches: 0,
             cluster_nodes_cache,
             reed_solomon_cache: Arc::<ReedSolomonCache>::default(),
+            ml_dsa,
         }
     }
 
@@ -86,6 +92,7 @@ impl StandardBroadcastRun {
                         .unwrap();
                 let (mut shreds, coding_shreds) = shredder.entries_to_shreds(
                     keypair,
+                    self.ml_dsa.as_deref(),
                     &[],  // entries
                     true, // is_last_in_slot,
                     should_chain_merkle_shreds(state.slot, cluster_type)
@@ -161,6 +168,7 @@ impl StandardBroadcastRun {
             Shredder::new(slot, parent_slot, reference_tick, self.shred_version).unwrap();
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             keypair,
+            self.ml_dsa.as_deref(),
             entries,
             is_slot_end,
             should_chain_merkle_shreds(slot, cluster_type).then_some(chained_merkle_root),
@@ -598,7 +606,7 @@ mod test {
     #[test]
     fn test_interrupted_slot_last_shred() {
         let keypair = Arc::new(Keypair::new());
-        let mut run = StandardBroadcastRun::new(0);
+        let mut run = StandardBroadcastRun::new(0, None);
 
         // Set up the slot to be interrupted
         let next_shred_index = 10;
@@ -655,7 +663,7 @@ mod test {
         };
 
         // Step 1: Make an incomplete transmission for slot 0
-        let mut standard_broadcast_run = StandardBroadcastRun::new(0);
+        let mut standard_broadcast_run = StandardBroadcastRun::new(0, None);
         standard_broadcast_run
             .test_process_receive_results(
                 &leader_keypair,
@@ -778,7 +786,7 @@ mod test {
         let (bsend, brecv) = unbounded();
         let (ssend, _srecv) = unbounded();
         let mut last_tick_height = 0;
-        let mut standard_broadcast_run = StandardBroadcastRun::new(0);
+        let mut standard_broadcast_run = StandardBroadcastRun::new(0, None);
         let mut process_ticks = |num_ticks| {
             let ticks = create_ticks(num_ticks, 0, genesis_config.hash());
             last_tick_height += (ticks.len() - 1) as u64;
@@ -836,7 +844,7 @@ mod test {
             last_tick_height: ticks.len() as u64,
         };
 
-        let mut standard_broadcast_run = StandardBroadcastRun::new(0);
+        let mut standard_broadcast_run = StandardBroadcastRun::new(0, None);
         standard_broadcast_run
             .test_process_receive_results(
                 &leader_keypair,
@@ -855,7 +863,7 @@ mod test {
     fn entries_to_shreds_max() {
         solana_logger::setup();
         let keypair = Keypair::new();
-        let mut bs = StandardBroadcastRun::new(0);
+        let mut bs = StandardBroadcastRun::new(0, None);
         bs.current_slot_and_parent = Some((1, 0));
         let entries = create_ticks(10_000, 1, solana_sdk::hash::Hash::default());
 

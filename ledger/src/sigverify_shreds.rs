@@ -4,7 +4,7 @@ use {
     itertools::{izip, Itertools},
     rayon::{prelude::*, ThreadPool},
     sha2::{Digest, Sha512},
-    solana_metrics::inc_new_counter_debug,
+    solana_metrics::{inc_new_counter_debug, inc_new_counter_info, inc_new_counter_warn},
     solana_perf::{
         cuda_runtime::PinnedVec,
         packet::{Packet, PacketBatch},
@@ -15,6 +15,8 @@ use {
     solana_sdk::{
         clock::Slot,
         hash::Hash,
+        ml_dsa_keypair::{ml_dsa_address, MlDsaKeypair},
+        ml_dsa_public_key::MlDsaPublicKey,
         pubkey::Pubkey,
         signature::{Keypair, Signature, Signer},
     },
@@ -46,6 +48,144 @@ pub fn verify_shred_cpu(packet: &Packet, slot_leaders: &HashMap<Slot, Pubkey>) -
         return false;
     };
     signature.verify(pubkey.as_ref(), data.as_ref())
+}
+
+// fork (Phase 3): additive post-quantum verification of an ML-DSA-44 shred. A
+// shred is a valid post-quantum shred iff:
+//   (a) the Ed25519 signature authenticates the Merkle root (and thus the
+//       commitment hashed into it) against the slot leader, exactly as the
+//       Ed25519 liveness path checks;
+//   (b) the trailer public key is the one the leader committed to:
+//       ml_dsa_address(pubkey) == the in-root commitment; and
+//   (c) the ML-DSA-44 signature over the Merkle root verifies under that key.
+// This is a NON-GATING audit (telemetry only) — the Ed25519 path gates liveness;
+// ml_dsa verification never discards a shred in v1. Returns false (not panics)
+// for non-ml_dsa or malformed shreds.
+#[must_use]
+pub fn verify_shred_ml_dsa_cpu(packet: &Packet, slot_leaders: &HashMap<Slot, Pubkey>) -> bool {
+    if packet.meta().discard() {
+        return false;
+    }
+    let Some(shred) = shred::layout::get_shred(packet) else {
+        return false;
+    };
+    if !shred::layout::is_ml_dsa_shred(shred) {
+        return false;
+    }
+    let Some(slot) = shred::layout::get_slot(shred) else {
+        return false;
+    };
+    let Some(pubkey) = slot_leaders.get(&slot) else {
+        return false;
+    };
+    let Some(signature) = shred::layout::get_signature(shred) else {
+        return false;
+    };
+    let Some(data) = shred::layout::get_signed_data(shred) else {
+        return false;
+    };
+    // (a) Ed25519 authenticates the Merkle root (which commits to the ml_dsa key).
+    if !signature.verify(pubkey.as_ref(), data.as_ref()) {
+        return false;
+    }
+    let merkle_root = data.as_ref();
+    let Some((commitment, ml_dsa_pubkey, ml_dsa_signature)) =
+        shred::layout::get_ml_dsa_regions(shred)
+    else {
+        return false;
+    };
+    let Ok(ml_dsa_pubkey) = <[u8; MlDsaKeypair::PUBLIC_KEY_LENGTH]>::try_from(ml_dsa_pubkey) else {
+        return false;
+    };
+    // (b) bind the trailer key to the leader via the in-root commitment.
+    if ml_dsa_address(&ml_dsa_pubkey).as_ref() != commitment {
+        return false;
+    }
+    // (c) the post-quantum signature over the Merkle root verifies.
+    let Ok(ml_dsa_signature) = <[u8; MlDsaKeypair::SIGNATURE_LENGTH]>::try_from(ml_dsa_signature)
+    else {
+        return false;
+    };
+    MlDsaPublicKey::from(ml_dsa_pubkey).verify(merkle_root, &ml_dsa_signature)
+}
+
+// fork (Phase 3): non-gating audit pass — verify every ml_dsa shred in the
+// batches and emit ok/fail telemetry. Does NOT mark any packet discard; the
+// Ed25519 pass is the liveness gate. Returns (ok, fail) counts (also for tests).
+pub fn audit_ml_dsa_shreds(
+    batches: &[PacketBatch],
+    slot_leaders: &HashMap<Slot, Pubkey>,
+) -> (usize, usize) {
+    let (mut ok, mut fail) = (0usize, 0usize);
+    for batch in batches {
+        for packet in batch.iter() {
+            if packet.meta().discard() {
+                continue;
+            }
+            let Some(shred) = shred::layout::get_shred(packet) else {
+                continue;
+            };
+            if !shred::layout::is_ml_dsa_shred(shred) {
+                continue;
+            }
+            if verify_shred_ml_dsa_cpu(packet, slot_leaders) {
+                ok += 1;
+            } else {
+                fail += 1;
+            }
+        }
+    }
+    if ok > 0 {
+        inc_new_counter_info!("ml_dsa_shred_verify_ok", ok);
+    }
+    if fail > 0 {
+        inc_new_counter_warn!("ml_dsa_shred_verify_fail", fail);
+    }
+    (ok, fail)
+}
+
+// fork (Phase 3): GATING variant of audit_ml_dsa_shreds, used only under the
+// opt-in --ml-dsa-shred-strict flag. Same per-shred verification, but DROPS
+// (set_discard) any ml_dsa shred that fails. Non-ml_dsa packets are untouched
+// (their Ed25519 gate already ran). Default validators use the non-gating audit
+// pass; strict mode is opt-in so an ml_dsa verification gap can never stall the
+// node unless the operator explicitly asks to enforce it. Returns (ok, fail).
+pub fn enforce_ml_dsa_shreds(
+    batches: &mut [PacketBatch],
+    slot_leaders: &HashMap<Slot, Pubkey>,
+) -> (usize, usize) {
+    let (mut ok, mut fail) = (0usize, 0usize);
+    for batch in batches.iter_mut() {
+        for packet in batch.iter_mut() {
+            if packet.meta().discard() {
+                continue;
+            }
+            // Drop the get_shred borrow before the mutable set_discard below.
+            let is_ml_dsa = shred::layout::get_shred(packet)
+                .map(shred::layout::is_ml_dsa_shred)
+                .unwrap_or(false);
+            if !is_ml_dsa {
+                continue;
+            }
+            if verify_shred_ml_dsa_cpu(packet, slot_leaders) {
+                ok += 1;
+            } else {
+                fail += 1;
+                packet.meta_mut().set_discard(true);
+            }
+        }
+    }
+    if ok > 0 {
+        inc_new_counter_info!("ml_dsa_shred_verify_ok", ok);
+    }
+    if fail > 0 {
+        inc_new_counter_warn!("ml_dsa_shred_verify_fail", fail);
+        // Strict mode dropped these; a distinct counter makes the enforcement
+        // action observable separately from the advisory-only fail count (which
+        // audit_ml_dsa_shreds also emits without discarding).
+        inc_new_counter_warn!("ml_dsa_shred_dropped", fail);
+    }
+    (ok, fail)
 }
 
 fn verify_shreds_cpu(
@@ -512,6 +652,207 @@ mod tests {
         run_test_sigverify_shred_cpu(0xdead_c0de);
     }
 
+    // fork (Phase 3): build an ml_dsa merkle data shred (Ed25519 leader =
+    // `keypair`, post-quantum signer = `ml_dsa_keypair`). With is_last_in_slot
+    // the final FEC set is resigned (ml_dsa+chained+resigned, 0x30) and we return
+    // a shred from it; otherwise the set is non-resigned (0xC0/0xD0).
+    fn make_ml_dsa_data_shred<R: Rng>(
+        rng: &mut R,
+        slot: Slot,
+        keypair: &Keypair,
+        ml_dsa_keypair: &MlDsaKeypair,
+        is_last_in_slot: bool,
+    ) -> Shred {
+        let reed_solomon_cache = ReedSolomonCache::default();
+        let version = rng.gen();
+        let num_entries = rng.gen_range(64..128);
+        let chained_merkle_root = Hash::new_from_array(rng.gen());
+        let entries = make_entries(rng, num_entries);
+        let (data_shreds, _coding) = Shredder::new(slot, slot - 1, 0, version)
+            .unwrap()
+            .entries_to_shreds(
+                keypair,
+                Some(ml_dsa_keypair),
+                &entries,
+                is_last_in_slot,
+                Some(chained_merkle_root), // chained_merkle_root
+                0,                         // next_shred_index
+                0,                         // next_code_index
+                true,                      // merkle_variant
+                &reed_solomon_cache,
+                &mut ProcessShredsStats::default(),
+            );
+        // The resigned (final) FEC set is the last one, so its shreds are last.
+        let shred = if is_last_in_slot {
+            data_shreds.into_iter().last().unwrap()
+        } else {
+            data_shreds.into_iter().next().unwrap()
+        };
+        assert!(shred::layout::is_ml_dsa_shred(shred.payload()));
+        shred
+    }
+
+    fn to_packet(shred: &Shred) -> Packet {
+        let mut packet = Packet::default();
+        shred.copy_to_packet(&mut packet);
+        packet
+    }
+
+    #[test]
+    fn test_sigverify_shred_ml_dsa_cpu() {
+        solana_logger::setup();
+        let mut rng = rand::thread_rng();
+        let slot = 0xdead_c0de;
+        let keypair = Keypair::new();
+        let ml_dsa_keypair = MlDsaKeypair::from_seed(&[3u8; 32]);
+        let shred = make_ml_dsa_data_shred(&mut rng, slot, &keypair, &ml_dsa_keypair, false);
+        let leader_slots = HashMap::from([(slot, keypair.pubkey())]);
+
+        // Honest ml_dsa shred verifies post-quantum.
+        assert!(verify_shred_ml_dsa_cpu(&to_packet(&shred), &leader_slots));
+
+        // Wrong / unknown leader => Ed25519 check (a) fails.
+        assert!(!verify_shred_ml_dsa_cpu(
+            &to_packet(&shred),
+            &HashMap::from([(slot, Keypair::new().pubkey())])
+        ));
+        assert!(!verify_shred_ml_dsa_cpu(
+            &to_packet(&shred),
+            &HashMap::new()
+        ));
+
+        // Tampered ML-DSA signature (flip the last payload byte) => check (c) fails.
+        let mut tampered = to_packet(&shred);
+        let size = tampered.meta().size;
+        tampered.buffer_mut()[size - 1] ^= 0xff;
+        assert!(!verify_shred_ml_dsa_cpu(&tampered, &leader_slots));
+
+        // Forged trailer: a DIFFERENT ml_dsa key validly signs the SAME Merkle
+        // root, so check (c) would pass — but its address != the in-root
+        // commitment, so the binding check (b) rejects it. This is the property
+        // that stops an attacker from swapping the (unsigned) trailer.
+        let merkle_root =
+            shred::layout::get_merkle_root(shred::layout::get_shred(&to_packet(&shred)).unwrap())
+                .unwrap();
+        let attacker = MlDsaKeypair::from_seed(&[0xab; 32]);
+        let attacker_sig = attacker.sign(merkle_root.as_ref()).unwrap();
+        assert!(attacker.verify(merkle_root.as_ref(), &attacker_sig));
+        let mut forged = to_packet(&shred);
+        let size = forged.meta().size;
+        let pubkey_start =
+            size - (MlDsaKeypair::PUBLIC_KEY_LENGTH + MlDsaKeypair::SIGNATURE_LENGTH);
+        let sig_start = pubkey_start + MlDsaKeypair::PUBLIC_KEY_LENGTH;
+        forged.buffer_mut()[pubkey_start..sig_start].copy_from_slice(attacker.public_key_bytes());
+        forged.buffer_mut()[sig_start..sig_start + MlDsaKeypair::SIGNATURE_LENGTH]
+            .copy_from_slice(&attacker_sig);
+        assert!(!verify_shred_ml_dsa_cpu(&forged, &leader_slots));
+
+        // fork (Phase 3): a RESIGNED (final-FEC-set) ml_dsa shred also verifies.
+        // Its layout differs — the dormant 64-byte retransmitter slot sits AFTER
+        // the trailer at the very end of the payload — so this exercises
+        // get_ml_dsa_regions / verify_shred_ml_dsa_cpu against the resigned trailer
+        // offset (0x30 = MerkleData ml_dsa+chained+resigned).
+        let resigned = make_ml_dsa_data_shred(&mut rng, slot, &keypair, &ml_dsa_keypair, true);
+        // The shred-variant byte follows the 64-byte Ed25519 signature; high
+        // nibble 0x30 == MerkleData ml_dsa+chained+resigned.
+        assert_eq!(resigned.payload()[64] & 0xF0, 0x30);
+        assert!(verify_shred_ml_dsa_cpu(&to_packet(&resigned), &leader_slots));
+        // Wrong leader => Ed25519 check (a) fails on the resigned shred too.
+        assert!(!verify_shred_ml_dsa_cpu(
+            &to_packet(&resigned),
+            &HashMap::from([(slot, Keypair::new().pubkey())])
+        ));
+        // Tampering the ml_dsa signature's last byte — which sits just before the
+        // dormant 64-byte resigned slot, not at the payload end — fails check (c),
+        // confirming the trailer is read from before that slot.
+        let mut tampered_resigned = to_packet(&resigned);
+        let size = tampered_resigned.meta().size;
+        tampered_resigned.buffer_mut()[size - 64 - 1] ^= 0xff;
+        assert!(!verify_shred_ml_dsa_cpu(&tampered_resigned, &leader_slots));
+
+        // A plain Ed25519 (non-ml_dsa) shred is ignored by the ml_dsa pass.
+        let mut ed_shred = Shred::new_from_data(
+            slot,
+            0,
+            0,
+            &[1, 2, 3, 4],
+            ShredFlags::LAST_SHRED_IN_SLOT,
+            0,
+            0,
+            0,
+        );
+        ed_shred.sign(&keypair);
+        assert!(!verify_shred_ml_dsa_cpu(
+            &to_packet(&ed_shred),
+            &leader_slots
+        ));
+
+        // The non-gating audit pass counts the honest shred as ok.
+        let batches = [PacketBatch::new(vec![to_packet(&shred)])];
+        assert_eq!(audit_ml_dsa_shreds(&batches, &leader_slots), (1, 0));
+    }
+
+    // fork (Phase 3): a tampered ml_dsa shred is dropped under strict enforcement
+    // (--ml-dsa-shred-strict) but left untouched by the default advisory audit.
+    // Crucially, strict mode only ever touches ml_dsa shreds: a plain Ed25519
+    // shred is never discarded (else strict mode would partition the node from
+    // turbine), and already-discarded packets are skipped.
+    #[test]
+    fn test_enforce_ml_dsa_shreds_strict_vs_audit() {
+        solana_logger::setup();
+        let mut rng = rand::thread_rng();
+        let slot = 0xdead_c0de;
+        let keypair = Keypair::new();
+        let ml_dsa_keypair = MlDsaKeypair::from_seed(&[5u8; 32]);
+        let leader_slots = HashMap::from([(slot, keypair.pubkey())]);
+        let honest = make_ml_dsa_data_shred(&mut rng, slot, &keypair, &ml_dsa_keypair, false);
+
+        // Flip the last trailer byte => the ml_dsa signature fails to verify.
+        let mut tampered = to_packet(&honest);
+        let size = tampered.meta().size;
+        tampered.buffer_mut()[size - 1] ^= 0xff;
+
+        // A plain Ed25519 (non-ml_dsa) shred — strict mode must never touch it.
+        let mut ed_shred = Shred::new_from_data(
+            slot,
+            0,
+            0,
+            &[1, 2, 3, 4],
+            ShredFlags::LAST_SHRED_IN_SLOT,
+            0,
+            0,
+            0,
+        );
+        ed_shred.sign(&keypair);
+
+        // An already-discarded ml_dsa packet — both passes must skip it.
+        let mut predropped = to_packet(&honest);
+        predropped.meta_mut().set_discard(true);
+
+        let mut batches = [PacketBatch::new(vec![
+            to_packet(&honest),
+            tampered,
+            to_packet(&ed_shred),
+            predropped,
+        ])];
+
+        // Advisory audit is non-gating: counts (1 ok, 1 fail) and discards nothing
+        // new (the Ed25519 and already-discarded packets are skipped, not counted).
+        assert_eq!(audit_ml_dsa_shreds(&batches, &leader_slots), (1, 1));
+        assert!(!batches[0][0].meta().discard()); // honest ml_dsa
+        assert!(!batches[0][1].meta().discard()); // tampered ml_dsa (advisory keeps)
+        assert!(!batches[0][2].meta().discard()); // plain Ed25519
+        assert!(batches[0][3].meta().discard()); // pre-discarded stays discarded
+
+        // Strict enforcement drops ONLY the failing ml_dsa shred; the honest and
+        // the plain Ed25519 shred are kept, and the pre-discarded one is skipped.
+        assert_eq!(enforce_ml_dsa_shreds(&mut batches, &leader_slots), (1, 1));
+        assert!(!batches[0][0].meta().discard()); // honest ml_dsa kept
+        assert!(batches[0][1].meta().discard()); // tampered ml_dsa dropped
+        assert!(!batches[0][2].meta().discard()); // plain Ed25519 untouched
+        assert!(batches[0][3].meta().discard()); // pre-discarded unchanged
+    }
+
     fn run_test_sigverify_shreds_cpu(thread_pool: &ThreadPool, slot: Slot) {
         solana_logger::setup();
         let mut batches = [PacketBatch::default()];
@@ -738,6 +1079,7 @@ mod tests {
                 .unwrap()
                 .entries_to_shreds(
                     keypair,
+                    None, // ml_dsa_keypair
                     &make_entries(rng, num_entries),
                     rng.gen(), // is_last_in_slot
                     // chained_merkle_root

@@ -9,10 +9,31 @@ use {
         packet::{to_packet_batches, Packet, PacketBatch},
         recycler::Recycler,
         sigverify,
-        test_tx::{test_multisig_tx, test_tx},
+        test_tx::{ml_dsa_packet_batches, test_ml_dsa_tx_wire, test_multisig_tx, test_tx},
     },
     test::Bencher,
 };
+
+// --- ML-DSA-44 vs ed25519 sigverify pipeline baseline (EPIC 4-2) ---
+// `bench_sigverify_simple` is the ed25519 baseline; `bench_sigverify_ml_dsa`
+// (below) drives replay-safe post-quantum ML-DSA-44 envelope packets through the
+// SAME CPU verify pipeline (`sigverify::ed25519_verify` ->
+// `verify_ml_dsa_envelope_packet`: deserialize + carrier-precompile ML-DSA verify
+// + address binding + anti-lift), so it measures the real verify path, not the
+// raw crypto primitive.
+//
+// These `#[bench]`es are nightly-only (`#![feature(test)]`) and the available
+// nightly cannot build the 2.0-era dep tree (pre-existing: ahash 0.7.6 uses the
+// removed `stdsimd` feature), so they are NOT part of the CI bench job
+// (ci/test-bench.sh). For a stable, runnable measurement on the pinned 1.76
+// toolchain, run:  cargo run --release -p solana-perf --example sigverify_ml_dsa
+//
+// Recorded pipeline baseline (release, build host, CPU verify path / no perf-libs;
+// NUM=256 packets, 128/batch):
+//   ed25519   verify: 18.24 us/packet
+//   ML-DSA-44 verify: 43.69 us/packet   (~2.4x)
+//   packet size: ed25519 183 B vs ML-DSA-44 3885 B (~21x)  (sig 2420 vs 64, pubkey 1312 vs 32)
+// Re-run the example to refresh these figures on a given host.
 
 const NUM: usize = 256;
 const LARGE_BATCH_PACKET_COUNT: usize = 128;
@@ -27,6 +48,25 @@ fn bench_sigverify_simple(bencher: &mut Bencher) {
         &std::iter::repeat(tx).take(num_packets).collect::<Vec<_>>(),
         128,
     );
+
+    let recycler = Recycler::default();
+    let recycler_out = Recycler::default();
+    // verify packets
+    bencher.iter(|| {
+        sigverify::ed25519_verify(&mut batches, &recycler, &recycler_out, false, num_packets);
+    })
+}
+
+#[bench]
+fn bench_sigverify_ml_dsa(bencher: &mut Bencher) {
+    // Post-quantum ML-DSA-44 envelope packets through the SAME CPU verify pipeline
+    // as `bench_sigverify_simple` (`ed25519_verify` -> `verify_ml_dsa_envelope_packet`).
+    // One signed wire is reused across all packets (verify cost is per-packet and
+    // independent of payload identity); see the module header for recorded numbers
+    // and the stable runnable example.
+    let wire = test_ml_dsa_tx_wire();
+    let num_packets = NUM;
+    let mut batches = ml_dsa_packet_batches(&wire, num_packets, 128);
 
     let recycler = Recycler::default();
     let recycler_out = Recycler::default();

@@ -47,7 +47,9 @@ use {
         accounts_background_service::AbsRequestSender, bank_forks::BankForks,
         commitment::BlockCommitmentCache, prioritization_fee_cache::PrioritizationFeeCache,
     },
-    solana_sdk::{clock::Slot, pubkey::Pubkey, signature::Keypair},
+    solana_sdk::{
+        clock::Slot, ml_dsa_keypair::MlDsaKeypair, pubkey::Pubkey, signature::Keypair,
+    },
     solana_turbine::retransmit_stage::RetransmitStage,
     solana_vote::vote_sender_types::ReplayVoteSender,
     std::{
@@ -91,6 +93,9 @@ pub struct TvuConfig {
     pub repair_whitelist: Arc<RwLock<HashSet<Pubkey>>>,
     pub wait_for_vote_to_start_leader: bool,
     pub replay_slots_concurrently: bool,
+    // fork (Phase 3): --ml-dsa-shred-strict — turbine drops ml_dsa shreds that
+    // fail post-quantum verification (default false = advisory/non-gating).
+    pub ml_dsa_shred_strict: bool,
 }
 
 impl Tvu {
@@ -104,6 +109,7 @@ impl Tvu {
     pub fn new(
         vote_account: &Pubkey,
         authorized_voter_keypairs: Arc<RwLock<Vec<Arc<Keypair>>>>,
+        ml_dsa_voter: Option<Arc<MlDsaKeypair>>,
         bank_forks: &Arc<RwLock<BankForks>>,
         cluster_info: &Arc<ClusterInfo>,
         sockets: TvuSockets,
@@ -181,6 +187,7 @@ impl Tvu {
             fetch_receiver,
             retransmit_sender.clone(),
             verified_sender,
+            tvu_config.ml_dsa_shred_strict,
         );
 
         let retransmit_stage = RetransmitStage::new(
@@ -251,6 +258,7 @@ impl Tvu {
         let replay_stage_config = ReplayStageConfig {
             vote_account: *vote_account,
             authorized_voter_keypairs,
+            ml_dsa_voter,
             exit: exit.clone(),
             rpc_subscriptions: rpc_subscriptions.clone(),
             leader_schedule_cache: leader_schedule_cache.clone(),
@@ -448,6 +456,7 @@ pub mod tests {
         let tvu = Tvu::new(
             &vote_keypair.pubkey(),
             Arc::new(RwLock::new(vec![Arc::new(vote_keypair)])),
+            None, // ml_dsa_voter: Ed25519 path in tests
             &bank_forks,
             &cref1,
             {

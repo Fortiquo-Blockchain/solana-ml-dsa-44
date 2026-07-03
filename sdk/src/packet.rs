@@ -13,12 +13,15 @@ use {
 };
 
 #[cfg(test)]
-static_assertions::const_assert_eq!(PACKET_DATA_SIZE, 1232);
+static_assertions::const_assert_eq!(PACKET_DATA_SIZE, 8192);
 /// Maximum over-the-wire size of a Transaction
-///   1280 is IPv6 minimum MTU
-///   40 bytes is the size of the IPv6 header
-///   8 bytes is the size of the fragment header
-pub const PACKET_DATA_SIZE: usize = 1280 - 40 - 8;
+///   Stock Solana caps this at `1280 - 40 - 8 = 1232` bytes (a single IPv6-MTU
+///   packet, chosen to avoid IP fragmentation). This fork raises it to 8192 so
+///   that one transaction can carry an ML-DSA-44 post-quantum signature
+///   (2420 B) plus its public key (1312 B), which together far exceed 1232 B.
+///   This intentionally breaks wire compatibility with stock Solana and is only
+///   valid on a self-hosted network.
+pub const PACKET_DATA_SIZE: usize = 8192;
 
 bitflags! {
     #[repr(C)]

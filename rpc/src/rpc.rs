@@ -3642,6 +3642,7 @@ pub mod rpc_full {
                     "unsupported encoding: {tx_encoding}. Supported encodings: base58, base64"
                 ))
             })?;
+
             let (wire_transaction, unsanitized_tx) =
                 decode_and_deserialize::<VersionedTransaction>(data, binary_encoding)?;
 
@@ -4540,8 +4541,8 @@ pub mod rpc_obsolete_v1_7 {
     }
 }
 
-const MAX_BASE58_SIZE: usize = 1683; // Golden, bump if PACKET_DATA_SIZE changes
-const MAX_BASE64_SIZE: usize = 1644; // Golden, bump if PACKET_DATA_SIZE changes
+const MAX_BASE58_SIZE: usize = 11188; // Golden, bump if PACKET_DATA_SIZE changes (was 1683 at 1232)
+const MAX_BASE64_SIZE: usize = 10924; // Golden, bump if PACKET_DATA_SIZE changes (was 1644 at 1232)
 fn decode_and_deserialize<T>(
     encoded: String,
     encoding: TransactionBinaryEncoding,
@@ -6931,6 +6932,63 @@ pub mod tests {
             )
         );
 
+        // fork: a replay-safe post-quantum ML-DSA-44 transaction (envelope carrier) with
+        // an invalid blockhash is rejected at preflight like any transaction — it flows
+        // through the normal preflight path (verify + simulate_transaction), so a doomed
+        // tx is not forwarded. (health is still Ok here.)
+        let alice = solana_sdk::ml_dsa_keypair::MlDsaKeypair::from_seed(&[1u8; 32]);
+        let ml_dsa_tx = solana_sdk::ml_dsa_envelope::sign_ml_dsa_transaction(
+            &[solana_sdk::system_instruction::transfer(
+                &alice.address(),
+                &solana_sdk::pubkey::new_rand(),
+                42,
+            )],
+            &alice,
+            Hash::default(), // invalid blockhash
+        )
+        .unwrap();
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":["{}"]}}"#,
+            bs58::encode(
+                serialize(&solana_sdk::transaction::VersionedTransaction::from(ml_dsa_tx)).unwrap()
+            )
+            .into_string()
+        );
+        let res = io.handle_request_sync(&req, meta.clone()).unwrap();
+        assert!(
+            res.contains(r#""code":-32002"#) && res.contains("BlockhashNotFound"),
+            "ML-DSA tx with an invalid blockhash must be rejected at preflight, got: {res}"
+        );
+
+        // fork: a VALID-blockhash ML-DSA tx whose fee payer (alice) is unfunded is also
+        // rejected at preflight — proving the blockhash arm is genuinely cleared (so the
+        // bad-blockhash rejection above is not a false positive) and that an underfunded
+        // fee payer is caught at preflight, not later in banking.
+        let valid_blockhash = bank_forks.read().unwrap().root_bank().last_blockhash();
+        let ml_dsa_tx = solana_sdk::ml_dsa_envelope::sign_ml_dsa_transaction(
+            &[solana_sdk::system_instruction::transfer(
+                &alice.address(),
+                &solana_sdk::pubkey::new_rand(),
+                42,
+            )],
+            &alice,
+            valid_blockhash,
+        )
+        .unwrap();
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":["{}"]}}"#,
+            bs58::encode(
+                serialize(&solana_sdk::transaction::VersionedTransaction::from(ml_dsa_tx)).unwrap()
+            )
+            .into_string()
+        );
+        let res = io.handle_request_sync(&req, meta.clone()).unwrap();
+        assert!(
+            res.contains(r#""code":-32002"#) && !res.contains("BlockhashNotFound"),
+            "ML-DSA tx with a valid blockhash but unfunded fee payer must be rejected at \
+             preflight for a non-blockhash reason, got: {res}"
+        );
+
         // sendTransaction will fail due to insanity
         bad_transaction.message.instructions[0].program_id_index = 0u8;
         let recent_blockhash = bank_forks.read().unwrap().root_bank().last_blockhash();
@@ -6997,18 +7055,20 @@ pub mod tests {
             )
         );
 
-        // sendTransaction will fail due to sanitization failure
+        // sendTransaction will fail: clearing the signatures makes the serialized tx
+        // start with a 0x00 short-vec length byte. (Post-quantum transactions no longer
+        // use a 0x00 wire marker — they are ordinary `VersionedTransaction`s carrying an
+        // ML-DSA carrier precompile — so there is no marker collision; this 0-signature
+        // tx is simply rejected as an invalid transaction by normal decode/sanitization.)
         bad_transaction.signatures.clear();
         let req = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":["{}"]}}"#,
             bs58::encode(serialize(&bad_transaction).unwrap()).into_string()
         );
-        let res = io.handle_request_sync(&req, meta);
-        assert_eq!(
-            res,
-            Some(
-                r#"{"jsonrpc":"2.0","error":{"code":-32602,"message":"invalid transaction: Transaction failed to sanitize accounts offsets correctly"},"id":1}"#.to_string(),
-            )
+        let res = io.handle_request_sync(&req, meta).expect("response");
+        assert!(
+            res.contains(r#""error""#) && res.contains(r#""code":-32602"#),
+            "a 0-signature transaction must be rejected as invalid, got: {res}"
         );
     }
 

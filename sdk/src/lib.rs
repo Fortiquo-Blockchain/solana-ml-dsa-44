@@ -50,7 +50,8 @@ pub use solana_program::{
     declare_sysvar_id, decode_error, ed25519_program, epoch_rewards, epoch_schedule,
     fee_calculator, impl_sysvar_get, incinerator, instruction, keccak, lamports,
     loader_instruction, loader_upgradeable_instruction, loader_v4, loader_v4_instruction, message,
-    msg, native_token, nonce, poseidon, program, program_error, program_memory, program_option,
+    ml_dsa_program, msg, native_token, nonce, poseidon, program, program_error, program_memory,
+    program_option,
     program_pack, rent, sanitize, sdk_ids, secp256k1_program, secp256k1_recover, serde_varint,
     serialize_utils, short_vec, slot_hashes, slot_history, stable_layout, stake, stake_history,
     syscalls, system_instruction, system_program, sysvar, unchecked_div_by_const, vote,
@@ -80,6 +81,11 @@ pub mod hash;
 pub mod inflation;
 pub mod inner_instruction;
 pub mod log;
+pub mod ml_dsa_envelope;
+pub mod ml_dsa_instruction;
+pub mod ml_dsa_keypair;
+pub mod ml_dsa_public_key;
+pub mod ml_dsa_signature;
 pub mod native_loader;
 pub mod net;
 pub mod nonce_account;

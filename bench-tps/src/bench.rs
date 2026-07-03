@@ -37,6 +37,19 @@ use {
     },
 };
 
+// --- ML-DSA-44 baseline (EPIC 4-2) ---
+// bench-tps spams an ed25519 `Transaction` workload at a live cluster to measure
+// end-to-end TPS. It stays on ed25519 because an ML-DSA-44 run requires BOTH a
+// running validator AND a raw `0x00`-wire submission path (an ML-DSA tx is not a
+// typed `Transaction`); converting it with no cluster to validate against would
+// ship unverified harness code. The ML-DSA cost that bounds its TPS is the
+// per-packet VERIFY cost, now measured for real through the actual CPU verify
+// pipeline (`sigverify::ed25519_verify` -> `verify_ml_dsa_envelope_packet`): ~2.4x ed25519
+// at ~3.9 KB/packet (21x larger). Reproduce on the pinned 1.76 toolchain:
+//   cargo run --release -p solana-perf --example sigverify_ml_dsa
+//   (nightly bench: perf/benches/sigverify.rs::bench_sigverify_ml_dsa)
+// Raw keygen/sign/verify primitive latencies: programs/ml-dsa-tests/examples/bench_verify.rs.
+
 // The point at which transactions become "too old", in seconds.
 const MAX_TX_QUEUE_AGE: u64 = (MAX_PROCESSING_AGE as f64 * DEFAULT_S_PER_SLOT) as u64;
 

@@ -8,14 +8,18 @@ use {
         cluster_info::{ClusterInfo, Node},
         contact_info::{LegacyContactInfo as ContactInfo, Protocol},
         crds::Cursor,
+        crds_value::{CrdsData, CrdsSignature, CrdsValue},
         gossip_service::GossipService,
     },
     solana_perf::packet::Packet,
     solana_runtime::bank_forks::BankForks,
     solana_sdk::{
         hash::Hash,
+        ml_dsa_keypair::MlDsaKeypair,
+        ml_dsa_public_key::MlDsaPublicKey,
+        ml_dsa_signature::MlDsaSignature,
         pubkey::Pubkey,
-        signature::{Keypair, Signer},
+        signature::{Keypair, Signable, Signer},
         timing::timestamp,
         transaction::Transaction,
     },
@@ -419,4 +423,192 @@ pub fn cluster_info_scale() {
     for node in nodes {
         node.1.join().unwrap();
     }
+}
+
+/// Phase 2b foundation — a reproducible two-node gossip harness.
+///
+/// Two in-process gossip nodes must each end up holding the *other's* signed
+/// `ContactInfo` CRDS value. Node B is seeded with A's address; A then learns B
+/// purely over gossip, which means B's signed `ContactInfo` propagated to A and A
+/// verified its signature on insert. `ContactInfo` is the node-identity CRDS value
+/// gossip is built on — today Ed25519-signed via the `Signable` trait in
+/// `gossip/src/crds_value.rs` — and Phase 2b will re-sign it with ML-DSA-44. This is
+/// the testbed a future test extends to assert the propagated value's signature is
+/// post-quantum. Non-`#[ignore]` so it runs in CI: `cargo test -p solana-gossip
+/// --test gossip two_node_gossip_crds_propagation`.
+///
+/// (CRDS *votes* are intentionally not exercised here: a vote rides the
+/// stake-weighted push path, which is degenerate between exactly two nodes — see the
+/// many-node `cluster_info_scale`. Vote-CRDS signing gets its own multi-node test
+/// when Phase 2b lands.)
+#[test]
+fn two_node_gossip_crds_propagation() {
+    solana_logger::setup();
+    let exit = Arc::new(AtomicBool::new(false));
+    let (node_a, gossip_a, _tvu_a) = test_node(exit.clone());
+    let (node_b, gossip_b, _tvu_b) = test_node(exit.clone());
+    let (a_id, b_id) = (node_a.id(), node_b.id());
+
+    // Seed B with A (the entrypoint). A must then learn B purely over gossip.
+    node_b.insert_info(node_a.my_contact_info());
+
+    // Converge: each node holds the other's gossip-propagated, signature-verified
+    // ContactInfo. A holding B's is the real proof — A was never told about B except
+    // through gossip.
+    let mut converged = false;
+    for _ in 0..60 {
+        let a_has_b = node_a.lookup_contact_info(&b_id, |_| ()).is_some();
+        let b_has_a = node_b.lookup_contact_info(&a_id, |_| ()).is_some();
+        if a_has_b && b_has_a {
+            converged = true;
+            break;
+        }
+        sleep(Duration::from_secs(1));
+    }
+    assert!(
+        converged,
+        "both nodes must hold the peer's gossip-propagated, signed ContactInfo"
+    );
+
+    exit.store(true, Ordering::Relaxed);
+    gossip_a.join().unwrap();
+    gossip_b.join().unwrap();
+}
+
+/// Phase 2b core — a CRDS value signed with an ML-DSA-44 identity verifies and
+/// survives the bincode wire round-trip gossip uses, and a key that doesn't match
+/// the identity is rejected at construction. (Live 2-node propagation of
+/// ML-DSA-signed values follows once the ClusterInfo identity plumbing lands.)
+#[test]
+fn ml_dsa_signed_crds_value_verifies_and_round_trips() {
+    let mldsa = MlDsaKeypair::new().unwrap();
+    let data =
+        CrdsData::LegacyContactInfo(ContactInfo::new_localhost(&mldsa.address(), timestamp()));
+
+    let value = CrdsValue::new_signed_ml_dsa(data.clone(), &mldsa).unwrap();
+    assert!(matches!(value.signature, CrdsSignature::MlDsa { .. }));
+    assert!(value.verify(), "ML-DSA-signed CRDS value must verify");
+
+    // Wire round-trip (gossip serializes CrdsValue with bincode).
+    let bytes = bincode::serialize(&value).unwrap();
+    let restored: CrdsValue = bincode::deserialize(&bytes).unwrap();
+    assert_eq!(restored, value);
+    assert!(restored.verify(), "value must still verify after a bincode round-trip");
+
+    // A keypair whose address != the data identity can't produce a verifiable
+    // value, so construction is rejected at the producer rather than silently
+    // dropped cluster-wide.
+    let wrong = MlDsaKeypair::new().unwrap();
+    assert!(
+        CrdsValue::new_signed_ml_dsa(data, &wrong).is_err(),
+        "signing with a key that doesn't match the identity must error"
+    );
+}
+
+/// Phase 2b — `verify` must reject every way an ML-DSA value can be forged: a
+/// corrupted signature (the crypto clause), mutated data after signing, and a
+/// carried key that doesn't hash to the identity (the binding clause). Together
+/// these exercise BOTH halves of the `&&` in the verify binding.
+#[test]
+fn ml_dsa_crds_value_rejects_tampering() {
+    let mldsa = MlDsaKeypair::new().unwrap();
+    let data =
+        CrdsData::LegacyContactInfo(ContactInfo::new_localhost(&mldsa.address(), timestamp()));
+
+    // (a) corrupted signature -> fails the crypto clause (binding still holds).
+    let mut bad_sig = CrdsValue::new_signed_ml_dsa(data.clone(), &mldsa).unwrap();
+    if let CrdsSignature::MlDsa { signature, .. } = &mut bad_sig.signature {
+        let mut raw = signature.to_bytes();
+        raw[0] ^= 0xFF;
+        *signature = Box::new(MlDsaSignature::from(raw));
+    }
+    assert!(!bad_sig.verify(), "a corrupted ML-DSA signature must be rejected");
+
+    // (b) mutated data -> the signature no longer matches the signed bytes.
+    let mut bad_data = CrdsValue::new_signed_ml_dsa(data.clone(), &mldsa).unwrap();
+    bad_data.data = CrdsData::LegacyContactInfo(ContactInfo::new_localhost(
+        &mldsa.address(),
+        timestamp() + 1,
+    ));
+    assert!(!bad_data.verify(), "an ML-DSA value with mutated data must be rejected");
+
+    // (c) all-zero carried key+sig over a real identity -> fails the binding
+    //     (sha256([0;1312]) != identity) and the crypto clause.
+    let garbage = CrdsValue {
+        signature: CrdsSignature::MlDsa {
+            pubkey: Box::new(MlDsaPublicKey::from([0u8; 1312])),
+            signature: Box::new(MlDsaSignature::from([0u8; 2420])),
+        },
+        data,
+    };
+    assert!(!garbage.verify(), "an all-zero ML-DSA pubkey+signature must be rejected");
+}
+
+/// Phase 2b — the Ed25519 path is unchanged under the new `CrdsSignature` enum: a
+/// classic value reports the `Ed25519` variant, verifies, and round-trips on the
+/// wire (the enum adds a 1-byte discriminant).
+#[test]
+fn ed25519_crds_value_round_trips_under_enum() {
+    let ed = Keypair::new();
+    let value = CrdsValue::new_signed(
+        CrdsData::LegacyContactInfo(ContactInfo::new_localhost(&ed.pubkey(), timestamp())),
+        &ed,
+    );
+    assert!(matches!(value.signature, CrdsSignature::Ed25519(_)));
+    assert!(value.verify(), "Ed25519 value must verify");
+
+    let restored: CrdsValue =
+        bincode::deserialize(&bincode::serialize(&value).unwrap()).unwrap();
+    assert_eq!(restored, value);
+    assert!(restored.verify(), "Ed25519 value must verify after a wire round-trip");
+}
+
+/// Phase 2b (live) — an ML-DSA-signed CRDS value gossiped by node A propagates to
+/// node B over the real wire and is accepted only because B's sigverify pass
+/// validated the post-quantum signature. A relays a value whose identity is an
+/// ML-DSA address distinct from either node's Ed25519 identity, exercising exactly
+/// the wire + verify path Phase 2b introduces. (A node signing its OWN gossip
+/// identity with ML-DSA is deferred — that needs node identity == ML-DSA address,
+/// which is entangled with shred signing / Phase 3.)
+#[test]
+fn ml_dsa_crds_value_propagates_between_live_nodes() {
+    solana_logger::setup();
+    let exit = Arc::new(AtomicBool::new(false));
+    let (node_a, gossip_a, _tvu_a) = test_node(exit.clone());
+    let (node_b, gossip_b, _tvu_b) = test_node(exit.clone());
+
+    // Connect both directions so A's push active set can target B.
+    node_b.insert_info(node_a.my_contact_info());
+    node_a.insert_info(node_b.my_contact_info());
+
+    // Build an ML-DSA-signed CRDS value for a post-quantum identity and have A
+    // gossip it. Its identity is the ML-DSA address — neither node's Ed25519 id.
+    let mldsa = MlDsaKeypair::new().unwrap();
+    let pq_id = mldsa.address();
+    let value = CrdsValue::new_signed_ml_dsa(
+        CrdsData::LegacyContactInfo(ContactInfo::new_localhost(&pq_id, timestamp())),
+        &mldsa,
+    )
+    .unwrap();
+    assert!(value.verify(), "the value must verify before we gossip it");
+    node_a.push_signed_crds_value(value);
+
+    // B must end up holding the value — it only lands in B's table if B's verify
+    // pass accepted the ML-DSA signature and the sha256(pubkey)==identity binding.
+    let mut propagated = false;
+    for _ in 0..60 {
+        if node_b.lookup_contact_info(&pq_id, |_| ()).is_some() {
+            propagated = true;
+            break;
+        }
+        sleep(Duration::from_secs(1));
+    }
+    assert!(
+        propagated,
+        "an ML-DSA-signed CRDS value must propagate to and verify on the peer"
+    );
+
+    exit.store(true, Ordering::Relaxed);
+    gossip_a.join().unwrap();
+    gossip_b.join().unwrap();
 }

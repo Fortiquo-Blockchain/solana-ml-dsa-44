@@ -184,6 +184,7 @@ impl BroadcastRun for BroadcastDuplicatesRun {
 
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             keypair,
+            None, // ml_dsa_keypair
             &receive_results.entries,
             last_tick_height == bank.max_tick_height() && last_entries.is_none(),
             should_chain_merkle_shreds.then_some(self.chained_merkle_root),
@@ -204,6 +205,7 @@ impl BroadcastRun for BroadcastDuplicatesRun {
             last_entries.map(|(original_last_entry, duplicate_extra_last_entries)| {
                 let (original_last_data_shred, _) = shredder.entries_to_shreds(
                     keypair,
+                    None, // ml_dsa_keypair
                     &[original_last_entry],
                     true,
                     should_chain_merkle_shreds.then_some(self.chained_merkle_root),
@@ -218,6 +220,7 @@ impl BroadcastRun for BroadcastDuplicatesRun {
                 // trying to repair.
                 let (partition_last_data_shred, _) = shredder.entries_to_shreds(
                     keypair,
+                    None, // ml_dsa_keypair
                     &duplicate_extra_last_entries,
                     true,
                     should_chain_merkle_shreds.then_some(self.chained_merkle_root),

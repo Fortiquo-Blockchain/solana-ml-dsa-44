@@ -1,14 +1,18 @@
 use {
+    crate::packet::{Packet, PacketBatch},
     rand::{CryptoRng, Rng, RngCore},
     solana_sdk::{
         clock::Slot,
         hash::Hash,
         instruction::CompiledInstruction,
+        ml_dsa_envelope::sign_ml_dsa_transaction,
+        ml_dsa_keypair::MlDsaKeypair,
+        pubkey::Pubkey,
         signature::{Keypair, Signer},
         stake,
-        system_instruction::SystemInstruction,
+        system_instruction::{self, SystemInstruction},
         system_program, system_transaction,
-        transaction::Transaction,
+        transaction::{Transaction, VersionedTransaction},
     },
     solana_vote_program::vote_transaction,
 };
@@ -50,6 +54,59 @@ pub fn test_multisig_tx() -> Transaction {
         program_ids,
         instructions,
     )
+}
+
+/// Raw wire bytes of a replay-safe post-quantum ML-DSA-44 transfer — a standard
+/// `VersionedTransaction` carrying the ML-DSA proof as a carrier precompile
+/// instruction (see `solana_sdk::ml_dsa_envelope`). This is the workload the CPU
+/// verify pipeline runs through the envelope fallback in `sigverify::verify_packet`.
+/// Each call mints a fresh keypair and signs, so it is comparatively slow (ML-DSA
+/// keygen + sign); build one wire and reuse it across packets when benchmarking
+/// *verify* throughput.
+pub fn test_ml_dsa_tx_wire() -> Vec<u8> {
+    let payer = MlDsaKeypair::new().expect("ml-dsa keygen");
+    let tx = sign_ml_dsa_transaction(
+        &[system_instruction::transfer(
+            &payer.address(),
+            &Pubkey::new_unique(),
+            42,
+        )],
+        &payer,
+        Hash::default(),
+    )
+    .expect("ml-dsa sign");
+    bincode::serialize(&VersionedTransaction::from(tx)).expect("serialize ml-dsa tx")
+}
+
+/// Pack ML-DSA envelope wire bytes into a [`Packet`] verbatim (the wire is the
+/// bincoded `VersionedTransaction`), matching how the validator ingests packets.
+pub fn ml_dsa_packet(wire: &[u8]) -> Packet {
+    let mut packet = Packet::from_data(None, 0u8).expect("packet header");
+    packet.buffer_mut()[..wire.len()].copy_from_slice(wire);
+    packet.meta_mut().size = wire.len();
+    packet
+}
+
+/// Repeat one prepared ML-DSA `0x00` packet into `Vec<PacketBatch>` of
+/// `packets_per_batch` (the final batch holds the remainder), for sigverify
+/// throughput benchmarking through `sigverify::ed25519_verify`.
+pub fn ml_dsa_packet_batches(
+    wire: &[u8],
+    total_packets: usize,
+    packets_per_batch: usize,
+) -> Vec<PacketBatch> {
+    debug_assert!(packets_per_batch > 0, "packets_per_batch must be non-zero");
+    let packet = ml_dsa_packet(wire);
+    let mut batches = Vec::new();
+    let mut remaining = total_packets;
+    while remaining > 0 {
+        let n = remaining.min(packets_per_batch);
+        let mut batch = PacketBatch::with_capacity(n);
+        batch.resize(n, packet.clone());
+        batches.push(batch);
+        remaining -= n;
+    }
+    batches
 }
 
 pub fn new_test_vote_tx<R>(rng: &mut R) -> Transaction

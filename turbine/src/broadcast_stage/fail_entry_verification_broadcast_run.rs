@@ -98,6 +98,7 @@ impl BroadcastRun for FailEntryVerificationBroadcastRun {
 
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             keypair,
+            None, // ml_dsa_keypair
             &receive_results.entries,
             last_tick_height == bank.max_tick_height() && last_entries.is_none(),
             Some(self.chained_merkle_root),
@@ -118,6 +119,7 @@ impl BroadcastRun for FailEntryVerificationBroadcastRun {
         let last_shreds = last_entries.map(|(good_last_entry, bad_last_entry)| {
             let (good_last_data_shred, _) = shredder.entries_to_shreds(
                 keypair,
+                None, // ml_dsa_keypair
                 &[good_last_entry],
                 true,
                 Some(self.chained_merkle_root),
@@ -132,6 +134,7 @@ impl BroadcastRun for FailEntryVerificationBroadcastRun {
             // repair.
             let (bad_last_data_shred, _) = shredder.entries_to_shreds(
                 keypair,
+                None, // ml_dsa_keypair
                 &[bad_last_entry],
                 false,
                 Some(self.chained_merkle_root),

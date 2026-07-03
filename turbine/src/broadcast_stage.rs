@@ -23,6 +23,7 @@ use {
     solana_runtime::bank_forks::BankForks,
     solana_sdk::{
         clock::Slot,
+        ml_dsa_keypair::MlDsaKeypair,
         pubkey::Pubkey,
         signature::Keypair,
         timing::{timestamp, AtomicInterval},
@@ -116,6 +117,8 @@ impl BroadcastStageType {
         bank_forks: Arc<RwLock<BankForks>>,
         shred_version: u16,
         quic_endpoint_sender: AsyncSender<(SocketAddr, Bytes)>,
+        // fork (Phase 3): optional post-quantum ML-DSA-44 shred-signing key.
+        ml_dsa: Option<Arc<MlDsaKeypair>>,
     ) -> BroadcastStage {
         match self {
             BroadcastStageType::Standard => BroadcastStage::new(
@@ -127,7 +130,7 @@ impl BroadcastStageType {
                 blockstore,
                 bank_forks,
                 quic_endpoint_sender,
-                StandardBroadcastRun::new(shred_version),
+                StandardBroadcastRun::new(shred_version, ml_dsa),
             ),
 
             BroadcastStageType::FailEntryVerification => BroadcastStage::new(
@@ -551,6 +554,7 @@ pub mod test {
         .unwrap();
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             &Keypair::new(),
+            None, // ml_dsa_keypair
             &entries,
             true, // is_last_in_slot
             // chained_merkle_root
@@ -695,7 +699,7 @@ pub mod test {
             blockstore.clone(),
             bank_forks,
             quic_endpoint_sender,
-            StandardBroadcastRun::new(0),
+            StandardBroadcastRun::new(0, None),
         );
 
         MockBroadcastStage {

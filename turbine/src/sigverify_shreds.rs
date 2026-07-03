@@ -3,7 +3,9 @@ use {
     rayon::{prelude::*, ThreadPool, ThreadPoolBuilder},
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::{
-        leader_schedule_cache::LeaderScheduleCache, shred, sigverify_shreds::verify_shreds_gpu,
+        leader_schedule_cache::LeaderScheduleCache,
+        shred,
+        sigverify_shreds::{audit_ml_dsa_shreds, enforce_ml_dsa_shreds, verify_shreds_gpu},
     },
     solana_perf::{self, deduper::Deduper, packet::PacketBatch, recycler_cache::RecyclerCache},
     solana_rayon_threadlimit::get_thread_count,
@@ -35,6 +37,9 @@ pub fn spawn_shred_sigverify(
     shred_fetch_receiver: Receiver<PacketBatch>,
     retransmit_sender: Sender<Vec</*shred:*/ Vec<u8>>>,
     verified_sender: Sender<Vec<PacketBatch>>,
+    // fork (Phase 3): --ml-dsa-shred-strict — drop ml_dsa shreds that fail the
+    // post-quantum verify (default false = advisory/non-gating).
+    ml_dsa_strict: bool,
 ) -> JoinHandle<()> {
     let recycler_cache = RecyclerCache::warmed();
     let mut stats = ShredSigVerifyStats::new(Instant::now());
@@ -62,6 +67,7 @@ pub fn spawn_shred_sigverify(
                 &shred_fetch_receiver,
                 &retransmit_sender,
                 &verified_sender,
+                ml_dsa_strict,
                 &mut stats,
             ) {
                 Ok(()) => (),
@@ -89,6 +95,7 @@ fn run_shred_sigverify<const K: usize>(
     shred_fetch_receiver: &Receiver<PacketBatch>,
     retransmit_sender: &Sender<Vec</*shred:*/ Vec<u8>>>,
     verified_sender: &Sender<Vec<PacketBatch>>,
+    ml_dsa_strict: bool,
     stats: &mut ShredSigVerifyStats,
 ) -> Result<(), Error> {
     const RECV_TIMEOUT: Duration = Duration::from_secs(1);
@@ -120,6 +127,7 @@ fn run_shred_sigverify<const K: usize>(
         bank_forks,
         leader_schedule_cache,
         recycler_cache,
+        ml_dsa_strict,
         &mut packets,
     );
     stats.num_discards_post += count_discards(&packets);
@@ -144,6 +152,9 @@ fn verify_packets(
     bank_forks: &RwLock<BankForks>,
     leader_schedule_cache: &LeaderScheduleCache,
     recycler_cache: &RecyclerCache,
+    // fork (Phase 3): when true (--ml-dsa-shred-strict), the post-quantum pass
+    // drops ml_dsa shreds that fail verification instead of only auditing them.
+    ml_dsa_strict: bool,
     packets: &mut [PacketBatch],
 ) {
     let working_bank = bank_forks.read().unwrap().working_bank();
@@ -155,6 +166,16 @@ fn verify_packets(
             .collect();
     let out = verify_shreds_gpu(thread_pool, packets, &leader_slots, recycler_cache);
     solana_perf::sigverify::mark_disabled(packets, &out);
+    // fork (Phase 3): post-quantum ML-DSA-44 pass against the same leader
+    // schedule. Default (advisory) only emits ok/fail telemetry and never touches
+    // the Ed25519 liveness gate above; strict mode additionally discards ml_dsa
+    // shreds that fail. A near no-op (one cheap variant-byte check per shred)
+    // when no ml_dsa shreds are present.
+    if ml_dsa_strict {
+        enforce_ml_dsa_shreds(packets, &leader_slots);
+    } else {
+        audit_ml_dsa_shreds(packets, &leader_slots);
+    }
 }
 
 // Returns pubkey of leaders for shred slots refrenced in the packets.
@@ -267,13 +288,18 @@ impl ShredSigVerifyStats {
 mod tests {
     use {
         super::*,
+        solana_entry::entry::create_ticks,
         solana_ledger::{
             genesis_utils::create_genesis_config_with_leader,
-            shred::{Shred, ShredFlags},
+            shred::{ProcessShredsStats, ReedSolomonCache, Shred, ShredFlags, Shredder},
         },
         solana_perf::packet::Packet,
         solana_runtime::bank::Bank,
-        solana_sdk::signature::{Keypair, Signer},
+        solana_sdk::{
+            hash::Hash,
+            ml_dsa_keypair::MlDsaKeypair,
+            signature::{Keypair, Signer},
+        },
     };
 
     #[test]
@@ -326,9 +352,142 @@ mod tests {
             &bank_forks,
             &leader_schedule_cache,
             &RecyclerCache::warmed(),
+            false, // ml_dsa_strict
             &mut batches,
         );
         assert!(!batches[0][0].meta().discard());
         assert!(batches[0][1].meta().discard());
+    }
+
+    // fork (Phase 3): build a real ML-DSA-44 merkle data shred for `slot`, signed
+    // by the Ed25519 leader `leader` and post-quantum-signed by `ml_dsa_keypair`.
+    fn make_ml_dsa_data_shred(slot: Slot, leader: &Keypair, ml_dsa_keypair: &MlDsaKeypair) -> Shred {
+        let reed_solomon_cache = ReedSolomonCache::default();
+        let entries = create_ticks(64, 0, Hash::default());
+        let (data_shreds, _coding) = Shredder::new(slot, slot - 1, 0, 0)
+            .unwrap()
+            .entries_to_shreds(
+                leader,
+                Some(ml_dsa_keypair),
+                &entries,
+                false, // is_last_in_slot
+                None,  // chained_merkle_root
+                0,     // next_shred_index
+                0,     // next_code_index
+                true,  // merkle_variant
+                &reed_solomon_cache,
+                &mut ProcessShredsStats::default(),
+            );
+        let shred = data_shreds.into_iter().next().unwrap();
+        assert!(shred::layout::is_ml_dsa_shred(shred.payload()));
+        shred
+    }
+
+    fn shred_to_packet(shred: &Shred) -> Packet {
+        let mut packet = Packet::default();
+        shred.copy_to_packet(&mut packet);
+        packet
+    }
+
+    // fork (Phase 3): exercise the real turbine receive-side entry point
+    // (`verify_packets`) on genuine ML-DSA-44 shreds bound to the slot leader —
+    // the cross-node receive path a single node never runs on its own shreds.
+    // Default (advisory) audits without discarding; strict (--ml-dsa-shred-strict)
+    // drops a failing ml_dsa shred while keeping the honest one. The Ed25519
+    // liveness gate runs first in both modes and is untouched.
+    #[test]
+    fn test_verify_packets_ml_dsa_strict_vs_audit() {
+        let leader_keypair = Arc::new(Keypair::new());
+        let leader_pubkey = leader_keypair.pubkey();
+        let bank = Bank::new_for_tests(
+            &create_genesis_config_with_leader(100, &leader_pubkey, 10).genesis_config,
+        );
+        let leader_schedule_cache = LeaderScheduleCache::new_from_bank(&bank);
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let thread_pool = ThreadPoolBuilder::new().num_threads(3).build().unwrap();
+        let recycler_cache = RecyclerCache::warmed();
+        let self_pubkey = Pubkey::new_unique(); // != leader, so shreds aren't self-discarded
+
+        let ml_dsa_keypair = MlDsaKeypair::from_seed(&[7u8; 32]);
+        // The genesis leader leads early slots, so slot 1 resolves to `leader`. Pin
+        // that explicitly: if slot 1 ever failed to resolve, the Ed25519 gate would
+        // discard the shreds and the "honest kept" assertions would pass for the
+        // wrong reason.
+        let working_bank = bank_forks.read().unwrap().working_bank();
+        assert_eq!(
+            leader_schedule_cache.slot_leader_at(1, Some(&working_bank)),
+            Some(leader_pubkey),
+        );
+        let honest = make_ml_dsa_data_shred(1, &leader_keypair, &ml_dsa_keypair);
+
+        // A plain Ed25519 (non-ml_dsa) data shred from the same leader — strict mode
+        // must NEVER drop it (else it would partition the node from turbine).
+        let mut ed_shred =
+            Shred::new_from_data(1, 0, 1, &[1, 2, 3, 4], ShredFlags::LAST_SHRED_IN_SLOT, 0, 0, 0);
+        ed_shred.sign(&leader_keypair);
+
+        // A fresh [honest, tampered, ed25519] batch per pass (verify_packets mutates
+        // discard flags). Flipping the honest shred's last byte corrupts the ML-DSA
+        // signature; the Ed25519 signature over the Merkle root is unaffected (the
+        // trailer is outside the signed region), so the tampered shred still passes
+        // the Ed25519 gate and only the ml_dsa check (c) fails.
+        let make_batches = || {
+            let mut tampered = shred_to_packet(&honest);
+            let size = tampered.meta().size;
+            tampered.buffer_mut()[size - 1] ^= 0xff;
+            vec![PacketBatch::new(vec![
+                shred_to_packet(&honest),
+                tampered,
+                shred_to_packet(&ed_shred),
+            ])]
+        };
+
+        // Advisory (default): the ml_dsa pass audits but discards nothing.
+        let mut batches = make_batches();
+        verify_packets(
+            &thread_pool,
+            &self_pubkey,
+            &bank_forks,
+            &leader_schedule_cache,
+            &recycler_cache,
+            false, // ml_dsa_strict
+            &mut batches,
+        );
+        assert!(
+            !batches[0][0].meta().discard(),
+            "honest ml_dsa shred kept (audit)"
+        );
+        assert!(
+            !batches[0][1].meta().discard(),
+            "tampered ml_dsa shred kept (audit)"
+        );
+        assert!(
+            !batches[0][2].meta().discard(),
+            "plain Ed25519 shred kept (audit)"
+        );
+
+        // Strict: the failing ml_dsa shred is dropped; the honest one survives.
+        let mut batches = make_batches();
+        verify_packets(
+            &thread_pool,
+            &self_pubkey,
+            &bank_forks,
+            &leader_schedule_cache,
+            &recycler_cache,
+            true, // ml_dsa_strict
+            &mut batches,
+        );
+        assert!(
+            !batches[0][0].meta().discard(),
+            "honest ml_dsa shred kept (strict)"
+        );
+        assert!(
+            batches[0][1].meta().discard(),
+            "tampered ml_dsa shred dropped (strict)"
+        );
+        assert!(
+            !batches[0][2].meta().discard(),
+            "plain Ed25519 shred kept (strict) — strict touches only ml_dsa"
+        );
     }
 }
